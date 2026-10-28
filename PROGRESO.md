@@ -1,12 +1,24 @@
 # Diario del curso
 
 ## Estado actual
-- **Clase completada:** 2 · Qué es de verdad un contenedor (Módulo 0 terminado)
-- **Entorno:** igual que en la Clase 1 (Windows 11 + WSL2 Ubuntu 22.04, Docker Desktop 4.97, uv 0.13.6, Python 3.13)
-- **Repo:** `raulalcon20/la-porra` (privado), en `~/la-porra`. Solo hay README y PROGRESO.md; todavía no hay código.
-- **Decisiones nuevas:** en los Dockerfiles se fijarán siempre las versiones de las imágenes (nada de `latest`).
-- **Pendiente:** responder 2 preguntas rápidas de repaso de la Clase 2 al empezar la siguiente sesión.
-- **Siguiente paso:** Clase 3 · Esqueleto de la API (FastAPI + uv + pytest)
+- **Clase completada:** 3 · Esqueleto de la API
+- **Entorno:** Windows 11 + WSL2 Ubuntu 22.04, Docker Desktop 4.97, uv 0.13.6, Python 3.13
+- **Rutina al empezar:** abrir Docker Desktop (desde la Clase 4) → `cd ~/la-porra` → `eval "$(ssh-agent -s)" && ssh-add` → `git pull` → `code .`
+- **Repo:** `raulalcon20/la-porra` (privado), en `~/la-porra`
+- **Hecho:**
+  - `services/api`, creado con uv (paquete `porra_api`, estructura `src/`)
+  - FastAPI con `/health` y `/version`
+  - Configuración con pydantic-settings (prefijo `PORRA_`, `get_settings()` con `lru_cache`)
+  - 3 tests con pytest, con `conftest.py` que vacía la caché de settings
+  - ruff configurado (E, W, F, I, UP, B)
+- **Decisiones:**
+  - Las variables de entorno llevan el prefijo `PORRA_`.
+  - Las dependencias de desarrollo van en el grupo `dev` (pytest, ruff, httpx2); no irán en la imagen de producción.
+  - Se usa httpx2 para el TestClient (Starlette marca httpx como obsoleto).
+  - En VS Code, el intérprete es el `.venv` de cada servicio.
+- **Pendiente:** validar la configuración al arrancar la API (*fail fast*), en vez de en la primera petición.
+- **Ritmo:** el de las Clases 1 a 3 es el adecuado (pasos cortos, predicciones y explicación de cada línea).
+- **Siguiente paso:** Clase 4 · Mi primer Dockerfile
 
 ---
 
@@ -157,3 +169,82 @@
 - 137 con `OOMKilled=true` = se pasó de memoria.
 - Si una petición no aparece en los logs de nginx, el problema está **antes** del servidor: en el puerto, la red o la URL.
 - Leer los mensajes de error con calma antes de forzar nada. Por ejemplo, `rmi` falla porque un contenedor usa la imagen; la solución es borrar el contenedor, no `rmi -f` a ciegas.
+
+
+
+## Clase 3 · Esqueleto de la API
+
+### Teoría
+
+**Anatomía de un proyecto Python con uv**
+- **`pyproject.toml`**: configuración estándar del proyecto (PEP 621): nombre, versión, `requires-python`, dependencias y configuración de herramientas (`[tool.ruff]`...). Declara rangos aceptables (`fastapi>=0.162`).
+- **`uv.lock`**: versiones **exactas** y hashes de todo el árbol de dependencias. **Se sube a Git**: garantiza que el portátil, la CI y Docker instalen exactamente lo mismo.
+- **`.venv/`**: el entorno virtual, con un Python y las librerías aisladas para este proyecto. **No se sube a Git**: se regenera a partir de `uv.lock`.
+- **`.python-version`**: la versión de Python que usa uv en esta carpeta.
+- **Estructura `src/`**: el código va en `src/<paquete>/`. Los tests importan el paquete **instalado**, igual que en producción, y no el fichero que haya en la carpeta actual. Por eso los imports son absolutos (`from porra_api.config import ...`).
+- `__init__.py` marca una carpeta como paquete de Python.
+- `[build-system]` (uv_build) es lo que permite instalar el paquete en el `.venv`.
+- **Dependencias de desarrollo** (`uv add --dev`, grupo `[dependency-groups] dev`): solo para programar y testear. No van a producción.
+- `uv run <cmd>` ejecuta un comando dentro del `.venv` sin activarlo.
+
+**FastAPI y uvicorn**
+- FastAPI asocia rutas a funciones con decoradores (`@app.get("/ruta")`). Lo que devuelve la función se convierte a JSON.
+- Las anotaciones de tipos se usan para validar y para generar la documentación: `/docs` (Swagger UI) se genera desde `/openapi.json` (estándar OpenAPI).
+- uvicorn es el servidor: escucha en el puerto y pasa las peticiones a la app mediante **ASGI**. Se arranca con `módulo:objeto` (`porra_api.main:app`).
+- `--reload` solo se usa en desarrollo.
+- Los errores también se devuelven en JSON (`404 {"detail": "Not Found"}`).
+- Un **500** significa que hubo una excepción. El detalle no se envía al cliente, por seguridad: **está en los logs del servidor**.
+- Parámetros *keyword-only*: un `*` en la firma obliga a pasar por nombre todo lo que viene después (`FastAPI(title=...)`).
+
+**Configuración (12-factor) con pydantic-settings**
+- La configuración va en **variables de entorno**, no en el código. Así la misma imagen sirve para desarrollo y producción, y los secretos quedan fuera de Git.
+- `BaseSettings` lee cada campo de su variable de entorno y **lo convierte al tipo declarado**. Si falta un campo obligatorio o el tipo es incorrecto, lanza `ValidationError`.
+- `env_prefix="PORRA_"`: el campo `environment` se lee de `PORRA_ENVIRONMENT`.
+- ⚠️ **Si el nombre de la variable no coincide con el del campo, se ignora en silencio** y se usa el valor por defecto. Una errata en el nombre del campo no da error.
+- `@lru_cache` en `get_settings()`: `Settings()` se crea una sola vez. En las siguientes llamadas **no se ejecuta el cuerpo de la función**, así que si cambias una variable de entorno con el proceso en marcha, no se entera.
+- Si `Settings()` se crea en la primera petición, una configuración inválida da un 500 en lugar de impedir el arranque. Lo ideal es **fallar rápido** (*fail fast*) al arrancar.
+- `VAR=valor comando` define la variable solo para ese comando.
+
+**Python: trampas vistas**
+- Una coma al final convierte un valor en tupla: `x = "0.1.0",` → `("0.1.0",)`.
+- Un traceback se lee **de abajo arriba**: la última línea es el error, y encima hay que buscar la última línea de **tu** código.
+
+**pytest**
+- Encuentra solo los ficheros `test_*.py` y las funciones `test_*`. Las comprobaciones se hacen con `assert`.
+- `TestClient(app)` llama a la app dentro del mismo proceso, sin servidor ni red.
+- **Fixtures**: preparación y limpieza alrededor de cada test. Lo que va después del `yield` se ejecuta **siempre**, aunque el test falle (como `try/finally`). En cambio, el código que va detrás de un `assert` que falla no se ejecuta.
+- `monkeypatch.setenv` cambia una variable de entorno solo durante el test.
+- `autouse=True` aplica la fixture a todos los tests.
+- `conftest.py` contiene fixtures compartidas. Tiene que estar en la carpeta de los tests (o por encima).
+- Las limpiezas se hacen en **orden inverso** a las preparaciones (pila, LIFO).
+- `--setup-show` muestra qué fixtures se ejecutan en cada test.
+- Los tests deben cambiar solo lo que quieren probar.
+- Hay que mantener la salida sin warnings, para que los avisos nuevos destaquen.
+
+**ruff**
+- **Linter** (`ruff check`, `--fix`) + **formateador** (`ruff format`), configurados en `[tool.ruff]`.
+- Reglas: E/W (PEP 8), F (errores lógicos), I (orden de imports), UP (sintaxis moderna), B (*bugbear*).
+- Orden de los imports: librería estándar → terceros → propios, separados por una línea en blanco.
+- Después de cualquier herramienta que modifique código, hay que volver a ejecutar los tests.
+
+### Comandos clave
+| Comando | Para qué |
+|---|---|
+| `uv init --package --name X --python 3.13 ruta` | Crear un proyecto con estructura `src/` |
+| `uv add pkg` / `uv add --dev pkg` | Añadir una dependencia de producción / de desarrollo |
+| `uv run uvicorn porra_api.main:app --reload` | Arrancar la API en desarrollo (puerto 8000) |
+| `PORRA_ENVIRONMENT=x uv run ...` | Lanzar un comando con una variable de entorno |
+| `curl -v url` | Petición HTTP con todo el detalle (sin `-s`, que oculta los errores) |
+| `uv run pytest -v` | Ejecutar los tests con detalle |
+| `uv run pytest --setup-show` | Ver qué fixtures se ejecutan en cada test |
+| `uv run ruff check [--fix]` | Revisar el código (y arreglar lo que se pueda automáticamente) |
+| `uv run ruff format` | Formatear el código |
+| `git status -u` | Listar todos los ficheros sin seguimiento, sin resumir carpetas |
+
+### Lecciones de depuración
+- **Un 500**: ir a los logs del servidor y leer el traceback de abajo arriba.
+- **Un `curl -s` que no devuelve nada**: quitar `-s` y usar `-v`.
+- **Alertas amarillas en los imports de VS Code**: el intérprete no es el del `.venv` (*Python: Select Interpreter*).
+- **Una variable de entorno que no tiene efecto**: comprobar el prefijo y el nombre del campo letra a letra. Y tener en cuenta la caché.
+- **Una fixture que "no hace nada"**: usar `--setup-show`. Si no aparece, comprobar el nombre y la ubicación de `conftest.py`.
+- **Renombrar en VS Code con F2**, para cambiar un nombre en todos los sitios a la vez
