@@ -1,25 +1,30 @@
 # Diario del curso
 
 ## Estado actual
-- **Clase completada:** 4a · Mi primer Dockerfile (parte 1)
+- **Clase completada:** 4 · Mi primer Dockerfile (4a y 4b)
 - **Entorno:** Windows 11 + WSL2 Ubuntu 22.04, Docker Desktop 4.97, uv 0.13.6, Python 3.13
 - **Rutina al empezar:** abrir Docker Desktop → `cd ~/la-porra` → `eval "$(ssh-agent -s)" && ssh-add` → `git pull` → `code .`
 - **Rutina al cerrar:** `git add` y `git status` **desde la raíz del repo**.
 - **Repo:** `raulalcon20/la-porra` (privado), en `~/la-porra`
 - **Hecho:**
-  - API FastAPI (`/health`, `/version`) con configuración en pydantic-settings, tests y ruff
-  - `services/api/Dockerfile` de una sola etapa, sobre `python:3.13-slim`, con uv 0.13.6 instalado con pip y las capas de dependencias separadas de las del código
-  - `.dockerignore`
-  - Imagen `porra-api:0.1.0`, que funciona con `docker run -p 8000:8000`
+  - API FastAPI (`/health`, `/version`) con pydantic-settings, tests (pytest) y ruff
+  - `services/api/Dockerfile` **multi-stage**:
+    - builder con uv 0.13.6 copiado de `ghcr.io/astral-sh/uv`
+    - runtime `python:3.13-slim` con solo el `.venv` (`--no-editable`, bytecode precompilado)
+    - usuario `app` (UID 1000), con el código propiedad de root y de solo lectura
+  - Imagen `porra-api:0.2.0` (204 MB; con una sola etapa ocupaba 302 MB)
 - **Decisiones:**
   - Prefijo `PORRA_` para las variables de entorno.
   - Dependencias de desarrollo en el grupo `dev`.
   - httpx2 para el TestClient.
-  - uvicorn escucha en `0.0.0.0` dentro del contenedor.
-  - `COPY` explícitos en lugar de `COPY . .`.
+  - uvicorn en `0.0.0.0:8000`.
+  - `COPY` explícitos.
+  - Misma imagen base en el builder y en el runtime.
+  - Sin `--chown`: la app no puede modificar su propio código.
+  - Tags: versión semántica + SHA del commit (desde la CI); nunca se despliega `latest`.
 - **Pendiente:** validar la configuración al arrancar (*fail fast*).
 - **Ritmo:** el de las clases anteriores es el adecuado.
-- **Siguiente paso:** Clase 4b · build multi-stage, usuario sin privilegios, tamaños de imagen y etiquetado
+- **Siguiente paso:** Clase 5 · Postgres, volúmenes y redes
 
 ---
 
@@ -302,3 +307,50 @@
 - *Connection reset* con `-p` publicado: mirar en `docker logs` **dónde escucha** el servidor. Si dice `127.0.0.1`, falta `--host 0.0.0.0`.
 - Si una prueba **desde dentro** (`docker exec`) funciona y desde fuera no, el problema no está en el código, sino en la red o la publicación del puerto.
 - En la salida del build, mirar qué pasos salen como `CACHED` y cuál es el **primero que no**: a partir de ahí se reconstruye todo.
+
+
+
+## Clase 4b · Imágenes de producción
+
+### Teoría
+
+**Medir imágenes**
+- `docker images`: **DISK USAGE** es lo que ocupa descomprimida en disco; **CONTENT SIZE**, lo que ocupa comprimida, que es lo que se descarga.
+- `docker history <img>`: cada capa, con la instrucción que la creó y su tamaño. Arriba están las capas propias y abajo las de la base. `<missing>` no indica ningún error: son capas sin un ID de imagen propio.
+- En la versión de una sola etapa, `pip install uv` ocupaba 67 MB: cinco veces más que todas las dependencias (13 MB). Las herramientas de build no deben ir en la imagen final.
+
+**Build multi-stage**
+- Varios `FROM` en un Dockerfile; **solo la última etapa es la imagen final**, y las demás se descartan. Es como compilar en C: necesitas `gcc` para compilar, pero solo distribuyes el binario.
+- `FROM ... AS builder` le pone nombre a una etapa. `COPY --from=builder` copia ficheros de esa etapa, y `COPY --from=<imagen>` los copia de otra imagen (así se trae el binario de uv de `ghcr.io/astral-sh/uv:0.13.6`).
+- La etapa final empieza **limpia**: no hereda nada de las anteriores.
+- **Misma imagen base en el builder y en el runtime**: el `.venv` tiene enlaces a `/usr/local/bin/python`, que tiene que existir, en la misma versión, en la imagen final.
+- `--no-editable`: el paquete se copia **dentro** del `.venv`. En modo editable (el de por defecto), el `.venv` solo tiene un enlace a `/app/src`, que en la etapa final no existe → `ModuleNotFoundError`.
+- `UV_COMPILE_BYTECODE=1`: precompila los `.pyc` en el build, para que la API arranque más rápido (y porque el usuario de la app no puede escribirlos).
+- `UV_PYTHON_DOWNLOADS=0`: prohíbe a uv descargar otro Python.
+- BuildKit construye en **paralelo** las etapas que no dependen entre sí.
+- Resultado: de 302 MB a 204 MB (comprimida, de 85,7 a 49,1 MB). Por encima de la base (181 MB) solo se añaden unos 20 MB.
+
+**Usuario sin privilegios (mínimo privilegio)**
+- Por defecto se es root en el contenedor: si alguien explota la app, actúa como root. Muchos clústeres de Kubernetes rechazan directamente los pods que se ejecutan como root.
+- `RUN useradd --system --uid 1000 --no-create-home app` + `USER app`. Se usa un **UID fijo**, porque Kubernetes trabaja con números.
+- Los puertos por debajo de 1024 requieren privilegios; el 8000 no.
+- ⚠️ **El código debe ser de root y de solo lectura.** Con `--chown=app:app`, la app podía modificar su propio `.venv` (comprobado con `touch`), lo que permitiría a un atacante meter una puerta trasera en las librerías. Sin `--chown`, los ficheros pertenecen a root y son legibles por todos: la API funciona y no puede modificarlos.
+- El usuario de la app solo debe poder escribir donde lo necesite. Más adelante: `readOnlyRootFilesystem` en Kubernetes (Clase 17).
+
+**Etiquetas (tags)**
+- Un tag es un **puntero con nombre** a una imagen (como una rama de Git a un commit). Una imagen puede tener varios: `docker tag porra-api:0.2.0 porra-api:latest` (mismo IMAGE ID).
+- **Versión semántica** MAYOR.MENOR.PARCHE + **SHA del commit** (desde la CI).
+- **Nunca se despliega `latest`**: cambia sin avisar, no sabes qué versión está corriendo y no puedes volver atrás de forma fiable.
+
+### Comandos clave
+| Comando | Para qué |
+|---|---|
+| `docker history <img>` | Ver las capas de una imagen y lo que ocupa cada una |
+| `docker tag <img:tag> <img:otro>` | Añadir otro tag a la misma imagen |
+| `docker exec api id` | Comprobar con qué usuario se ejecuta el contenedor |
+| `docker exec api ls -ld <ruta>` | Ver los permisos y el propietario de una carpeta |
+| `docker rmi <img:tag>` | Borrar una imagen |
+
+### Lecciones de depuración
+- Si `docker images` no muestra la imagen nueva, revisar la salida del build y **en qué carpeta se ejecutó** (el build context).
+- Comprobar la seguridad **probándola**: intentar escribir donde no se debería poder (`touch`) y verificar que falla.
