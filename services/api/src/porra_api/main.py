@@ -2,7 +2,7 @@ from fastapi import FastAPI
 
 from porra_api.config import get_settings
 
-app = FastAPI(title="La Porra API")
+app = FastAPI(title="La Porra API -API simple")
 
 
 @app.get("/health")

@@ -1,24 +1,25 @@
 # Diario del curso
 
 ## Estado actual
-- **Clase completada:** 3 · Esqueleto de la API
+- **Clase completada:** 4a · Mi primer Dockerfile (parte 1)
 - **Entorno:** Windows 11 + WSL2 Ubuntu 22.04, Docker Desktop 4.97, uv 0.13.6, Python 3.13
-- **Rutina al empezar:** abrir Docker Desktop (desde la Clase 4) → `cd ~/la-porra` → `eval "$(ssh-agent -s)" && ssh-add` → `git pull` → `code .`
+- **Rutina al empezar:** abrir Docker Desktop → `cd ~/la-porra` → `eval "$(ssh-agent -s)" && ssh-add` → `git pull` → `code .`
+- **Rutina al cerrar:** `git add` y `git status` **desde la raíz del repo**.
 - **Repo:** `raulalcon20/la-porra` (privado), en `~/la-porra`
 - **Hecho:**
-  - `services/api`, creado con uv (paquete `porra_api`, estructura `src/`)
-  - FastAPI con `/health` y `/version`
-  - Configuración con pydantic-settings (prefijo `PORRA_`, `get_settings()` con `lru_cache`)
-  - 3 tests con pytest, con `conftest.py` que vacía la caché de settings
-  - ruff configurado (E, W, F, I, UP, B)
+  - API FastAPI (`/health`, `/version`) con configuración en pydantic-settings, tests y ruff
+  - `services/api/Dockerfile` de una sola etapa, sobre `python:3.13-slim`, con uv 0.13.6 instalado con pip y las capas de dependencias separadas de las del código
+  - `.dockerignore`
+  - Imagen `porra-api:0.1.0`, que funciona con `docker run -p 8000:8000`
 - **Decisiones:**
-  - Las variables de entorno llevan el prefijo `PORRA_`.
-  - Las dependencias de desarrollo van en el grupo `dev` (pytest, ruff, httpx2); no irán en la imagen de producción.
-  - Se usa httpx2 para el TestClient (Starlette marca httpx como obsoleto).
-  - En VS Code, el intérprete es el `.venv` de cada servicio.
-- **Pendiente:** validar la configuración al arrancar la API (*fail fast*), en vez de en la primera petición.
-- **Ritmo:** el de las Clases 1 a 3 es el adecuado (pasos cortos, predicciones y explicación de cada línea).
-- **Siguiente paso:** Clase 4 · Mi primer Dockerfile
+  - Prefijo `PORRA_` para las variables de entorno.
+  - Dependencias de desarrollo en el grupo `dev`.
+  - httpx2 para el TestClient.
+  - uvicorn escucha en `0.0.0.0` dentro del contenedor.
+  - `COPY` explícitos en lugar de `COPY . .`.
+- **Pendiente:** validar la configuración al arrancar (*fail fast*).
+- **Ritmo:** el de las clases anteriores es el adecuado.
+- **Siguiente paso:** Clase 4b · build multi-stage, usuario sin privilegios, tamaños de imagen y etiquetado
 
 ---
 
@@ -248,3 +249,56 @@
 - **Una variable de entorno que no tiene efecto**: comprobar el prefijo y el nombre del campo letra a letra. Y tener en cuenta la caché.
 - **Una fixture que "no hace nada"**: usar `--setup-show`. Si no aparece, comprobar el nombre y la ubicación de `conftest.py`.
 - **Renombrar en VS Code con F2**, para cambiar un nombre en todos los sitios a la vez
+
+
+
+## Clase 4a · Mi primer Dockerfile (parte 1)
+
+### Teoría
+
+**Dockerfile y capas**
+- El Dockerfile es la receta de una imagen: instrucciones que se ejecutan en orden. **Cada instrucción que modifica ficheros (`COPY`, `RUN`) crea una capa.** `ENV`, `EXPOSE` y `CMD` solo guardan metadatos y no aparecen como pasos del build.
+- Instrucciones:
+  - **`FROM`**: imagen base (siempre la primera). Hay que fijar la versión (`python:3.13-slim`).
+  - **`WORKDIR`**: directorio de trabajo dentro de la imagen (lo crea si no existe).
+  - **`COPY`**: copia ficheros del build context a la imagen. Con varios orígenes, el destino termina en `/`.
+  - **`RUN`**: ejecuta un comando **durante el build** y guarda el resultado como capa.
+  - **`ENV`**: variable de entorno que tendrán todos los contenedores de la imagen. Con `PATH="/app/.venv/bin:$PATH"` se "activa" el `.venv`.
+  - **`EXPOSE`**: solo **documenta** el puerto; no publica nada (eso lo hace `-p`).
+  - **`CMD`**: el comando que se ejecuta **al arrancar el contenedor** (su PID 1). En formato lista (*exec form*), el proceso es el PID 1 directamente y recibe bien las señales.
+- `uv sync --frozen --no-dev`: instala exactamente lo que dice `uv.lock`, sin dependencias de desarrollo.
+- `--no-install-project`: instala solo las dependencias, no el paquete propio.
+- Si `pyproject.toml` tiene `readme = "README.md"`, ese fichero es necesario para construir el paquete.
+
+**Build context y `.dockerignore`**
+- `docker build .`: el `.` es el **build context**, la carpeta que se envía al motor. El motor no lee tu disco: los `COPY` solo pueden coger lo que esté en el contexto.
+- `.dockerignore` excluye ficheros del contexto: `.venv` (pesado, y con enlaces a un Python que no existe en la imagen), las cachés, `tests/` y `.env` (los secretos nunca deben acabar en una imagen).
+- Un contexto bien filtrado: 58 KB, casi todo `uv.lock`.
+
+**Caché de capas**
+- Docker reutiliza una capa si la instrucción y la capa anterior son iguales. En los `COPY`, además, si los ficheros copiados no han cambiado.
+- ⚠️ **Cuando un paso se invalida, se invalidan todos los que vienen detrás** (efecto cascada).
+- Hay que ordenar **de lo que cambia menos a lo que cambia más**: primero `pyproject.toml` + `uv.lock` y la instalación de dependencias, y después el código. Así, un cambio en el código solo reconstruye las últimas capas.
+- `COPY . .` copia también el propio `Dockerfile`: cambiar el `CMD` invalidaba el `COPY` y obligaba a reinstalar todo. Es mejor usar `COPY` explícitos.
+- Cada build mueve el tag a la imagen nueva y deja la antigua como `<none>` (*dangling*). Se limpian con `docker image prune`.
+- Un contenedor que ya está corriendo **no se actualiza** al reconstruir la imagen: hay que pararlo y lanzar uno nuevo.
+
+**Redes: `--host 0.0.0.0`**
+- `127.0.0.1` dentro del contenedor es el loopback **del contenedor**: solo lo pueden usar sus propios procesos.
+- El tráfico que llega desde fuera con `-p` entra por la interfaz `eth0` del contenedor (red `bridge`; el cliente aparece como `172.17.0.1`, la puerta de enlace de Docker).
+- Si el servidor escucha solo en `127.0.0.1`, desde fuera da *connection reset*. Con **`0.0.0.0`** escucha en todas las interfaces.
+- En una conexión TCP, el servidor usa un puerto fijo (8000) y el cliente un **puerto efímero** que asigna el sistema operativo al azar (el `:50350` de los logs).
+
+### Comandos clave
+| Comando | Para qué |
+|---|---|
+| `docker build -t nombre:tag .` | Construir una imagen con nombre y versión |
+| `docker run -d --rm --name api -p 8000:8000 porra-api:0.1.0` | Ejecutar la API en un contenedor |
+| `docker exec api python -c "..."` | Probar algo desde dentro (la imagen slim no trae curl) |
+| `docker images <nombre>` | Ver las imágenes con ese nombre |
+| `docker image prune` | Borrar las imágenes `<none>` que no usa nadie |
+
+### Lecciones de depuración
+- *Connection reset* con `-p` publicado: mirar en `docker logs` **dónde escucha** el servidor. Si dice `127.0.0.1`, falta `--host 0.0.0.0`.
+- Si una prueba **desde dentro** (`docker exec`) funciona y desde fuera no, el problema no está en el código, sino en la red o la publicación del puerto.
+- En la salida del build, mirar qué pasos salen como `CACHED` y cuál es el **primero que no**: a partir de ahí se reconstruye todo.
