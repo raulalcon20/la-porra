@@ -1,30 +1,25 @@
 # Diario del curso
 
 ## Estado actual
-- **Clase completada:** 4 · Mi primer Dockerfile (4a y 4b)
+- **Clase completada:** 5a · Postgres, volúmenes y redes (parte 1)
 - **Entorno:** Windows 11 + WSL2 Ubuntu 22.04, Docker Desktop 4.97, uv 0.13.6, Python 3.13
 - **Rutina al empezar:** abrir Docker Desktop → `cd ~/la-porra` → `eval "$(ssh-agent -s)" && ssh-add` → `git pull` → `code .`
 - **Rutina al cerrar:** `git add` y `git status` **desde la raíz del repo**.
 - **Repo:** `raulalcon20/la-porra` (privado), en `~/la-porra`
 - **Hecho:**
-  - API FastAPI (`/health`, `/version`) con pydantic-settings, tests (pytest) y ruff
-  - `services/api/Dockerfile` **multi-stage**:
-    - builder con uv 0.13.6 copiado de `ghcr.io/astral-sh/uv`
-    - runtime `python:3.13-slim` con solo el `.venv` (`--no-editable`, bytecode precompilado)
-    - usuario `app` (UID 1000), con el código propiedad de root y de solo lectura
-  - Imagen `porra-api:0.2.0` (204 MB; con una sola etapa ocupaba 302 MB)
+  - API FastAPI (`/health`, `/version`) con pydantic-settings, tests y ruff
+  - Imagen multi-stage `porra-api:0.2.0`, sin privilegios
+  - Practicado Postgres 18 en un contenedor, con un volumen con nombre y una red propia (sin cambios en el repo)
 - **Decisiones:**
   - Prefijo `PORRA_` para las variables de entorno.
-  - Dependencias de desarrollo en el grupo `dev`.
-  - httpx2 para el TestClient.
+  - Dependencias de desarrollo en el grupo `dev`; httpx2 para el TestClient.
   - uvicorn en `0.0.0.0:8000`.
-  - `COPY` explícitos.
-  - Misma imagen base en el builder y en el runtime.
-  - Sin `--chown`: la app no puede modificar su propio código.
-  - Tags: versión semántica + SHA del commit (desde la CI); nunca se despliega `latest`.
+  - Dockerfile multi-stage, con la misma base en el builder y en el runtime, y el código propiedad de root.
+  - Tags: versión semántica + SHA del commit; nunca se despliega `latest`.
+  - **Postgres 18**, con el volumen montado en `/var/lib/postgresql` (no en `/data`).
 - **Pendiente:** validar la configuración al arrancar (*fail fast*).
 - **Ritmo:** el de las clases anteriores es el adecuado.
-- **Siguiente paso:** Clase 5 · Postgres, volúmenes y redes
+- **Siguiente paso:** Clase 5b · SQLAlchemy 2, Alembic y modelo de dominio
 
 ---
 
@@ -354,3 +349,47 @@
 ### Lecciones de depuración
 - Si `docker images` no muestra la imagen nueva, revisar la salida del build y **en qué carpeta se ejecutó** (el build context).
 - Comprobar la seguridad **probándola**: intentar escribir donde no se debería poder (`touch`) y verificar que falla.
+
+
+
+## Clase 5a · Postgres, volúmenes y redes (parte 1)
+
+### Teoría
+
+**Volúmenes**
+- La capa escribible muere con el contenedor. Los datos que deben persistir van **fuera**:
+  - **Volumen con nombre** (`-v nombre:/ruta`): lo gestiona Docker. Es lo adecuado para los **datos** de servicios.
+  - **Bind mount** (`-v /ruta/host:/ruta`): una carpeta tuya. Se usa en **desarrollo** (*hot reload*).
+- **Un volumen tiene un ciclo de vida independiente del contenedor**: se borra el contenedor, el volumen sigue, y se puede montar en otro contenedor nuevo.
+- El `Mountpoint` está dentro de la máquina virtual de Docker Desktop, no en tu Ubuntu. Los volúmenes se gestionan con `docker volume`.
+- ⚠️ **Postgres 18+**: el volumen se monta en **`/var/lib/postgresql`** (los datos van en `18/docker`). Si se monta en la ruta antigua, `/var/lib/postgresql/data`, Postgres arranca una base de datos vacía sin avisar.
+
+**La imagen oficial de Postgres**
+- `POSTGRES_USER`, `POSTGRES_PASSWORD` y `POSTGRES_DB` **solo se usan en la inicialización** (con el volumen vacío): `initdb` + un servidor temporal (que solo escucha en un socket Unix, no en la red) + `CREATE DATABASE` + scripts de `/docker-entrypoint-initdb.d/` → se apaga → arranca el servidor definitivo como PID 1, escuchando en `0.0.0.0:5432`.
+- Con el volumen ya inicializado: `Skipping initialization`.
+- ⚠️ **Cambiar `POSTGRES_PASSWORD` con un volumen existente no cambia la contraseña.** Los usuarios viven en la base de datos, y la base de datos vive en el volumen. Para cambiarla: `ALTER USER`, o borrar el volumen (perdiendo los datos).
+- Las conexiones locales (`docker exec ... psql`) usan autenticación *trust* y no piden contraseña. Las conexiones por red, sí.
+- **WAL** (*Write-Ahead Log*): después de un `rm -f` (SIGKILL), Postgres se recupera reaplicando el WAL (*redo*). Aun así, con las bases de datos se usa **`docker stop`** (SIGTERM, cierre ordenado).
+
+**Redes**
+- **`localhost` dentro de un contenedor es el propio contenedor.**
+- La red `bridge` por defecto (172.17.x): los contenedores tienen IP, pero **no hay DNS por nombre**.
+- Las **redes creadas por el usuario** (`docker network create`) tienen DNS: cada contenedor es accesible por su **nombre**. Cada red tiene su propio rango de IPs (172.18.x...).
+- `docker network connect red contenedor` conecta un contenedor que ya está corriendo; `--network red` lo conecta al crearlo.
+
+**Diagnóstico por capas**
+| Error | Capa | Qué comprobar |
+|---|---|---|
+| `could not translate host name` | DNS | ¿Están los dos contenedores en la misma red de usuario? ¿El nombre es correcto? |
+| `Connection refused` | TCP | ¿Es el host correcto? (`localhost` = el propio contenedor) ¿El servicio escucha en ese puerto y en `0.0.0.0`? |
+| `password authentication failed` | Aplicación | La red funciona; revisar las credenciales (¿se cambiaron solo en las variables, con el volumen ya existente?) |
+
+### Comandos clave
+| Comando | Para qué |
+|---|---|
+| `docker run -d --name db -e POSTGRES_... -v vol:/var/lib/postgresql postgres:18` | Postgres con un volumen con nombre |
+| `docker exec -it db psql -U usuario -d bd` | Abrir psql dentro del contenedor |
+| `psql ... -c "SQL"` | Ejecutar una consulta y salir |
+| `docker volume ls` / `inspect` / `rm` | Gestionar volúmenes |
+| `docker network create` / `connect` / `rm` | Gestionar redes |
+| `docker run --rm --network red -e PGPASSWORD=... postgres:18 psql -h db ...` | Conectarse a Postgres desde otro contenedor, por red |
