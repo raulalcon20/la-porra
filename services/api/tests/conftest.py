@@ -4,7 +4,9 @@ from porra_api.config import get_settings
 
 
 @pytest.fixture(autouse=True)
-def clear_settings_cache():
+def entorno_de_test(monkeypatch):
+    """Configuración mínima para todos los tests, con la caché de settings limpia."""
+    monkeypatch.setenv("PORRA_DATABASE_URL", "postgresql+psycopg://test:test@localhost:5432/test")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()

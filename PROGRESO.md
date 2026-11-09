@@ -1,25 +1,45 @@
 # Diario del curso
 
 ## Estado actual
-- **Clase completada:** 5a · Postgres, volúmenes y redes (parte 1)
-- **Entorno:** Windows 11 + WSL2 Ubuntu 22.04, Docker Desktop 4.97, uv 0.13.6, Python 3.13
-- **Rutina al empezar:** abrir Docker Desktop → `cd ~/la-porra` → `eval "$(ssh-agent -s)" && ssh-add` → `git pull` → `code .`
+- **Clase completada:** 5 · Postgres, volúmenes, redes y modelo de datos (5a y 5b)
+- **Entorno:** Windows 11 + WSL2 Ubuntu 22.04, Docker Desktop 4.97, uv 0.13.6, Python 3.13, Postgres 18
+- **Rutina al empezar:** abrir Docker Desktop → `cd ~/la-porra` → `eval "$(ssh-agent -s)" && ssh-add` → `git pull` → `code .` → `docker start db` → `export PORRA_DATABASE_URL="postgresql+psycopg://porra:porra_dev@localhost:5432/porra"`
 - **Rutina al cerrar:** `git add` y `git status` **desde la raíz del repo**.
 - **Repo:** `raulalcon20/la-porra` (privado), en `~/la-porra`
 - **Hecho:**
   - API FastAPI (`/health`, `/version`) con pydantic-settings, tests y ruff
   - Imagen multi-stage `porra-api:0.2.0`, sin privilegios
-  - Practicado Postgres 18 en un contenedor, con un volumen con nombre y una red propia (sin cambios en el repo)
+  - Modelo de datos en SQLAlchemy 2 (`models.py`): competiciones, jornadas, partidos, jugadores, porras, miembros, pronósticos
+  - Alembic configurado (URL desde `PORRA_DATABASE_URL`) con la migración "esquema inicial", aplicada y probada con `downgrade`
+  - Contenedor `db` (postgres:18) con el volumen `porra-pgdata` y el puerto 5432 publicado, para desarrollo
 - **Decisiones:**
   - Prefijo `PORRA_` para las variables de entorno.
+  - `PORRA_DATABASE_URL` es obligatoria (sin valor por defecto); en los tests la define `conftest.py`.
   - Dependencias de desarrollo en el grupo `dev`; httpx2 para el TestClient.
-  - uvicorn en `0.0.0.0:8000`.
   - Dockerfile multi-stage, con la misma base en el builder y en el runtime, y el código propiedad de root.
-  - Tags: versión semántica + SHA del commit; nunca se despliega `latest`.
-  - **Postgres 18**, con el volumen montado en `/var/lib/postgresql` (no en `/data`).
-- **Pendiente:** validar la configuración al arrancar (*fail fast*).
+  - Tags: versión semántica + SHA; nunca se despliega `latest`.
+  - Postgres 18, con el volumen montado en `/var/lib/postgresql`.
+  - Driver `psycopg[binary]` (psycopg 3).
+  - `NAMING_CONVENTION` para nombrar las restricciones.
+  - Las fechas, con zona horaria (UTC).
+  - El resultado que cuenta es el de los 90 minutos.
+- **Pendiente:**
+  - Validar la configuración al arrancar (*fail fast*).
+  - Incluir `alembic.ini` y `migrations/` en la imagen Docker.
 - **Ritmo:** el de las clases anteriores es el adecuado.
-- **Siguiente paso:** Clase 5b · SQLAlchemy 2, Alembic y modelo de dominio
+- **Siguiente paso:** Clase 6 · Docker Compose
+
+
+## Cambios de alcance (decididos en la Clase 5b)
+- **Plataforma de porras multicompetición**: un jugador puede estar en varias porras; cada porra pertenece a una competición y una temporada. El pronóstico es por jugador y partido, compartido entre porras.
+- **La Máquina** solo puede unirse a porras de competiciones de tipo liga (empezamos con LaLiga, `PD`).
+- **Champions League**: fases (fase de liga + eliminatorias). Cuenta el resultado de los 90 minutos. Se añade después de tener el flujo completo funcionando con LaLiga.
+- **Interfaz**: el bot de Telegram (no WhatsApp: su API de grupos exige una cuenta verificada, está limitada a 8 participantes y no funciona con grupos ya existentes). El bot solo habla con la API, así que se pueden añadir otros canales como adaptadores.
+- **Roadmap ajustado:**
+  - Clase 7: ingestor parametrizado por código de competición (`PD` primero).
+  - Clase 8 → **8a** (jugadores, pronósticos, puntuación) y **8b** (porras: crear, unirse con código de invitación, clasificación por porra, regla de La Máquina).
+  - Clase 11: cada grupo de Telegram se asocia a una porra.
+  - **Extensiones** (al final): Champions (eliminatorias + migración "¿quién pasa?" con punto extra) y una web sencilla con FastAPI + HTMX.
 
 ---
 
@@ -393,3 +413,54 @@
 | `docker volume ls` / `inspect` / `rm` | Gestionar volúmenes |
 | `docker network create` / `connect` / `rm` | Gestionar redes |
 | `docker run --rm --network red -e PGPASSWORD=... postgres:18 psql -h db ...` | Conectarse a Postgres desde otro contenedor, por red |
+
+
+
+## Clase 5b · SQLAlchemy 2, Alembic y modelo de dominio
+
+### Teoría
+
+**Diseño del modelo**
+- **N:M** (jugadores ↔ partidos, porras ↔ jugadores) → **tabla intermedia** (`pronosticos`, `miembros`). La tabla intermedia puede tener sus propios datos (los goles y los puntos de un pronóstico).
+- **Datos derivados** (puntos totales, clasificación) **no se guardan**: se calculan. Cada dato tiene una única fuente de verdad. Los `puntos` de cada pronóstico sí se guardan (`NULL` = sin puntuar ≠ 0).
+- **Clave primaria propia** + **ID externo `UNIQUE`** (`football_data_id`): no se depende del proveedor, y el `UNIQUE` permite el **upsert idempotente** del ingestor.
+- Las columnas que aún no tienen valor (los goles de un partido sin jugar, los equipos de una eliminatoria antes del sorteo) son **nulas**.
+- **Las restricciones de integridad van en la base de datos** (`UNIQUE`, `FK`): evitan las **condiciones de carrera** que una comprobación en Python no evita. Las **reglas de negocio** (horario de los pronósticos, La Máquina solo en ligas) van en la API: son más fáciles de leer, testear y cambiar.
+- "¿Ha empezado el partido?" se comprueba en el momento de escribir (ahora frente a `inicio`). No hace falta ningún trigger ni aviso programado.
+- `ON DELETE CASCADE` (un jugador se lleva sus pronósticos y sus membresías; RGPD) frente a `RESTRICT` (no se borra un partido con pronósticos ni una competición con porras).
+- **Clave primaria compuesta** en `miembros` (`porra_id`, `jugador_id`): ya garantiza la unicidad.
+- `UNIQUE ... NULLS NOT DISTINCT` (Postgres 15+): por defecto, dos `NULL` se consideran distintos en un `UNIQUE`.
+- **YAGNI**, pero distinguiendo: lo que es barato ahora y caro de cambiar después (la competición, en la identidad de cada jornada) se hace ya; lo que es caro ahora y barato después (eliminatorias, "¿quién pasa?") se deja para más adelante.
+
+**SQLAlchemy 2**
+- **ORM**: clases ↔ tablas, atributos ↔ columnas. Se escribe Python y el ORM genera el SQL.
+- `Mapped[T]` → `NOT NULL`; `Mapped[T | None]` → admite `NULL`. `mapped_column(...)` para claves primarias, foráneas, `unique`, `String(n)`, `DateTime(timezone=True)`, `server_default`...
+- `server_default` lo aplica **Postgres** (también a las filas insertadas fuera de la API); `default` lo aplica Python.
+- Restricciones de varias columnas: `__table_args__ = (UniqueConstraint(...),)`. Es una tupla: la coma final es necesaria.
+- `DeclarativeBase` + `MetaData(naming_convention=...)`: nombres de restricciones predecibles (`fk_tabla_columna_referida`...), que Alembic necesita para modificarlas en el futuro.
+- **Driver**: `psycopg` habla el protocolo de Postgres. `[binary]` incluye libpq compilada (no hace falta tenerla en el sistema).
+- URL: `postgresql+psycopg://usuario:contraseña@host:puerto/bd` (dialecto+driver).
+
+**Alembic (migraciones)**
+- **Control de versiones del esquema**: cada cambio es un fichero con `upgrade()` y `downgrade()`. La tabla `alembic_version` guarda la última migración aplicada en cada base de datos.
+- `alembic init migrations`: crea `alembic.ini`, `env.py`, `script.py.mako` y `versions/`.
+- En `env.py`: la URL se toma de `Settings` (no hay credenciales en `alembic.ini`), y `target_metadata = Base.metadata`.
+- `revision --autogenerate`: compara los modelos con la base de datos. **Siempre se revisa** antes de aplicarla.
+- El orden de creación y borrado sigue las claves foráneas (**orden topológico**): primero lo referenciado, y se borra en orden inverso.
+- `upgrade head`, `downgrade base`, `current`. **Hay que probar que el `downgrade` funciona.**
+- Desplegar código nuevo **no cambia el esquema**: hay que aplicar las migraciones.
+
+### Comandos clave
+| Comando | Para qué |
+|---|---|
+| `uv add sqlalchemy "psycopg[binary]" alembic` | ORM + driver + migraciones |
+| `export VAR=valor` | Definir una variable para toda la sesión de la terminal |
+| `uv run alembic init migrations` | Inicializar Alembic |
+| `uv run alembic revision --autogenerate -m "..."` | Generar una migración comparando con los modelos |
+| `uv run alembic upgrade head` / `downgrade base` / `current` | Aplicar / deshacer todas / ver la versión actual |
+| `psql -c "\dt"` / `"\d tabla"` | Listar tablas / ver la estructura de una tabla |
+| `uv run ruff check --fix --unsafe-fixes` | Aplicar también arreglos que podrían cambiar el comportamiento (revisar después) |
+
+### Lecciones de depuración
+- `E402` (import fuera del principio del fichero): ruff no lo arregla solo; hay que mover los imports a mano.
+- Un campo obligatorio nuevo en `Settings` rompe los tests que crean la configuración: se define en una fixture `autouse` de `conftest.py`.

@@ -10,6 +10,7 @@ class Settings(BaseSettings):
 
     app_version: str = "0.1.0"
     environment: str = "development"
+    database_url: str
 
 
 @lru_cache
