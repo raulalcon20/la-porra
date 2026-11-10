@@ -27,6 +27,8 @@ RUN useradd --system --uid 1000 --no-create-home app
 WORKDIR /app
 
 COPY --from=builder /app/.venv /app/.venv
+COPY alembic.ini ./
+COPY migrations ./migrations
 
 ENV PATH="/app/.venv/bin:$PATH"
 

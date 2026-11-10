@@ -1,33 +1,26 @@
 # Diario del curso
 
 ## Estado actual
-- **Clase completada:** 5 · Postgres, volúmenes, redes y modelo de datos (5a y 5b)
+- **Clase completada:** 6a · Docker Compose (parte 1)
 - **Entorno:** Windows 11 + WSL2 Ubuntu 22.04, Docker Desktop 4.97, uv 0.13.6, Python 3.13, Postgres 18
-- **Rutina al empezar:** abrir Docker Desktop → `cd ~/la-porra` → `eval "$(ssh-agent -s)" && ssh-add` → `git pull` → `code .` → `docker start db` → `export PORRA_DATABASE_URL="postgresql+psycopg://porra:porra_dev@localhost:5432/porra"`
-- **Rutina al cerrar:** `git add` y `git status` **desde la raíz del repo**.
-- **Repo:** `raulalcon20/la-porra` (privado), en `~/la-porra`
+- **Rutina al empezar:** abrir Docker Desktop → `cd ~/la-porra` → `eval "$(ssh-agent -s)" && ssh-add` → `git pull` → `code .` → `docker compose up -d`
+- **Rutina al cerrar:** `git add` y `git status` desde la raíz → commit y push → `docker compose down` (**nunca** `-v`, salvo para empezar de cero a propósito)
+- **Repo:** `raulalcon20/la-porra` (privado), en `~/la-porra`. Nombre de producto pendiente: "La Porra" es el nombre en clave; la marca se cambiará sin tocar los nombres internos (dominio).
 - **Hecho:**
   - API FastAPI (`/health`, `/version`) con pydantic-settings, tests y ruff
-  - Imagen multi-stage `porra-api:0.2.0`, sin privilegios
-  - Modelo de datos en SQLAlchemy 2 (`models.py`): competiciones, jornadas, partidos, jugadores, porras, miembros, pronósticos
-  - Alembic configurado (URL desde `PORRA_DATABASE_URL`) con la migración "esquema inicial", aplicada y probada con `downgrade`
-  - Contenedor `db` (postgres:18) con el volumen `porra-pgdata` y el puerto 5432 publicado, para desarrollo
+  - Modelo SQLAlchemy (7 tablas) y migración inicial de Alembic
+  - Imagen multi-stage sin privilegios, que ahora incluye `alembic.ini` y `migrations/`
+  - `compose.yaml` en la raíz: `db` (postgres:18, volumen `pgdata`, healthcheck con `pg_isready`, puerto 5432) y `api` (build, `PORRA_DATABASE_URL` por interpolación con el host `db`, `depends_on` con `service_healthy`, puerto 8000)
+  - `.env` (fuera de Git) y `.env.example` (en Git)
 - **Decisiones:**
-  - Prefijo `PORRA_` para las variables de entorno.
-  - `PORRA_DATABASE_URL` es obligatoria (sin valor por defecto); en los tests la define `conftest.py`.
-  - Dependencias de desarrollo en el grupo `dev`; httpx2 para el TestClient.
-  - Dockerfile multi-stage, con la misma base en el builder y en el runtime, y el código propiedad de root.
+  - Prefijo `PORRA_`; `PORRA_DATABASE_URL` obligatoria.
+  - Postgres 18 con el volumen en `/var/lib/postgresql`.
+  - Las credenciales de la base de datos tienen una sola fuente de verdad: el `.env`, interpolado en `compose.yaml`.
+  - Las migraciones se ejecutan como un paso aparte (`docker compose run --rm api alembic upgrade head`), nunca en el `CMD`.
   - Tags: versión semántica + SHA; nunca se despliega `latest`.
-  - Postgres 18, con el volumen montado en `/var/lib/postgresql`.
-  - Driver `psycopg[binary]` (psycopg 3).
-  - `NAMING_CONVENTION` para nombrar las restricciones.
-  - Las fechas, con zona horaria (UTC).
-  - El resultado que cuenta es el de los 90 minutos.
-- **Pendiente:**
-  - Validar la configuración al arrancar (*fail fast*).
-  - Incluir `alembic.ini` y `migrations/` en la imagen Docker.
+- **Pendiente:** validar la configuración al arrancar (*fail fast*).
 - **Ritmo:** el de las clases anteriores es el adecuado.
-- **Siguiente paso:** Clase 6 · Docker Compose
+- **Siguiente paso:** Clase 6b · hot reload, desarrollo frente a producción y tests en Compose
 
 
 ## Cambios de alcance (decididos en la Clase 5b)
@@ -464,3 +457,50 @@
 ### Lecciones de depuración
 - `E402` (import fuera del principio del fichero): ruff no lo arregla solo; hay que mover los imports a mano.
 - Un campo obligatorio nuevo en `Settings` rompe los tests que crean la configuración: se define en una fixture `autouse` de `conftest.py`.
+
+
+
+## Clase 6a · Docker Compose (parte 1)
+
+### Teoría
+
+**Compose**
+- **Declarativo**: se describe el estado deseado en YAML (`compose.yaml`) y Compose crea, recrea o deja como está lo necesario. Es la antesala de Kubernetes. Lo contrario es imperativo: dar órdenes paso a paso con `docker run`.
+- Crea automáticamente una red propia con **DNS**: cada **servicio** es accesible por su nombre (`db:5432`).
+- Prefijo del **nombre del proyecto** (la carpeta): `la-porra_pgdata`, `la-porra_default`.
+- Campos: `image`, `build` (carpeta con el Dockerfile; con `build`, `image` es el nombre que recibe la imagen construida), `environment`, `volumes`, `ports` (entre comillas), `healthcheck`, `depends_on`, y `volumes:` en el nivel superior para declarar los volúmenes con nombre.
+
+**Secretos e interpolación**
+- Compose lee el `.env` de la carpeta del proyecto y sustituye cada `${VAR}` en `compose.yaml`. Los secretos no se escriben en ficheros que van a Git.
+- **`.env`**: valores reales, **fuera de Git**. **`.env.example`**: la estructura, sin secretos, **en Git** (`cp .env.example .env`).
+- Una sola fuente de verdad: la URL de la API se construye por interpolación con las mismas credenciales que usa Postgres.
+
+**Arranque ordenado**
+- **Running ≠ healthy.** Postgres está *running* desde el primer segundo, pero solo está listo al final de la inicialización.
+- `healthcheck`: `test` (`pg_isready`), `interval`, `timeout`, `retries`, `start_period` (periodo de gracia). Estado: `health: starting` → `healthy` / `unhealthy`.
+- `depends_on` a secas: espera a que el contenedor **arranque**. Con `condition: service_healthy`: espera a que esté **sano**.
+
+**Dos caminos hacia Postgres**
+- Desde **otro contenedor** de la red de Compose: `db:5432`, gracias al DNS de Docker. Ahí, `localhost` es el propio contenedor.
+- Desde **WSL** (fuera de la red): `localhost:5432`, gracias al puerto publicado con `ports`.
+
+**Migraciones como paso aparte, no en el `CMD`**
+- Con varias réplicas, todas migrarían a la vez (condiciones de carrera y bloqueos).
+- Si una migración falla, la API entra en un bucle de reinicios. Siendo un paso aparte, se detiene el despliegue y la versión anterior sigue funcionando.
+- El PID 1 de la API sirve peticiones; migrar es una tarea **puntual de despliegue** (en Kubernetes: un Job o un initContainer, Clase 15).
+- **Mínimo privilegio**: la API puede usar un usuario de base de datos sin permisos de DDL (`CREATE`/`ALTER`/`DROP`).
+
+**Ciclo de vida**
+- `down` borra los contenedores y la red, y **conserva los volúmenes**. **`down -v` borra también los volúmenes, y con ellos los datos.**
+
+### Comandos clave
+| Comando | Para qué |
+|---|---|
+| `docker compose up -d [servicio]` | Levantar todo (o un servicio) en segundo plano |
+| `docker compose up -d --build` | Reconstruir las imágenes antes de levantar |
+| `docker compose ps [-a]` | Ver los contenedores del proyecto y su estado de salud |
+| `docker compose logs [-f] servicio` | Ver los logs de un servicio |
+| `docker compose exec servicio cmd` | Ejecutar un comando en un contenedor que está corriendo |
+| `docker compose run --rm servicio cmd` | Contenedor nuevo y puntual, con la configuración del servicio (migraciones) |
+| `docker compose down` | Parar y borrar los contenedores y la red (los volúmenes se conservan) |
+| `docker compose down -v` | ⚠️ Lo mismo, y además borra los volúmenes |
