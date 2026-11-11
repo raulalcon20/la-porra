@@ -1,7 +1,7 @@
 # Diario del curso
 
 ## Estado actual
-- **Clase completada:** 6a · Docker Compose (parte 1)
+- **Clase completada:** 6 · Docker Compose (6a y 6b)
 - **Entorno:** Windows 11 + WSL2 Ubuntu 22.04, Docker Desktop 4.97, uv 0.13.6, Python 3.13, Postgres 18
 - **Rutina al empezar:** abrir Docker Desktop → `cd ~/la-porra` → `eval "$(ssh-agent -s)" && ssh-add` → `git pull` → `code .` → `docker compose up -d`
 - **Rutina al cerrar:** `git add` y `git status` desde la raíz → commit y push → `docker compose down` (**nunca** `-v`, salvo para empezar de cero a propósito)
@@ -12,6 +12,9 @@
   - Imagen multi-stage sin privilegios, que ahora incluye `alembic.ini` y `migrations/`
   - `compose.yaml` en la raíz: `db` (postgres:18, volumen `pgdata`, healthcheck con `pg_isready`, puerto 5432) y `api` (build, `PORRA_DATABASE_URL` por interpolación con el host `db`, `depends_on` con `service_healthy`, puerto 8000)
   - `.env` (fuera de Git) y `.env.example` (en Git)
+    - Etapa `dev` en el Dockerfile (dependencias de desarrollo y paquete en modo editable)
+  - `compose.override.yaml` para desarrollo: build `target: dev` (imagen `porra-api:dev`), bind mounts de `src/` y `tests/`, `--reload` y puerto 5432 de `db`. La base `compose.yaml` usa la imagen final (`porra-api:local`) sin el puerto de Postgres.
+  - Tests y ruff dentro de Compose: `docker compose run --rm --no-deps api pytest -v`
 - **Decisiones:**
   - Prefijo `PORRA_`; `PORRA_DATABASE_URL` obligatoria.
   - Postgres 18 con el volumen en `/var/lib/postgresql`.
@@ -20,8 +23,7 @@
   - Tags: versión semántica + SHA; nunca se despliega `latest`.
 - **Pendiente:** validar la configuración al arrancar (*fail fast*).
 - **Ritmo:** el de las clases anteriores es el adecuado.
-- **Siguiente paso:** Clase 6b · hot reload, desarrollo frente a producción y tests en Compose
-
+- **Siguiente paso:** Clase 7 · El ingestor: datos reales de LaLiga
 
 ## Cambios de alcance (decididos en la Clase 5b)
 - **Plataforma de porras multicompetición**: un jugador puede estar en varias porras; cada porra pertenece a una competición y una temporada. El pronóstico es por jugador y partido, compartido entre porras.
@@ -504,3 +506,45 @@
 | `docker compose run --rm servicio cmd` | Contenedor nuevo y puntual, con la configuración del servicio (migraciones) |
 | `docker compose down` | Parar y borrar los contenedores y la red (los volúmenes se conservan) |
 | `docker compose down -v` | ⚠️ Lo mismo, y además borra los volúmenes |
+
+
+
+## Clase 6b · Desarrollo frente a producción
+
+### Teoría
+
+**Hot reload con bind mounts**
+- Un bind mount de `src/` deja ver en el contenedor los cambios de tu carpeta al instante. Con el repo en el sistema de ficheros de Linux (no en `/mnt/c`), los cambios llegan rápido y uvicorn los detecta.
+- ⚠️ Con `--no-editable` (imagen de producción), el paquete está **copiado** en el `.venv`: uvicorn se recarga, pero Python importa la copia antigua. Se diagnostica con `python -c "import paquete; print(paquete.__file__)"`.
+- Para desarrollo hace falta el modo **editable**: el `.venv` apunta a `/app/src`.
+
+**Etapa `dev` en el Dockerfile**
+- `FROM builder AS dev` + `uv sync --frozen` (con el grupo `dev` y en modo editable).
+- Va **antes** de la etapa final: si no se indica `target`, Docker construye **la última etapa**, así que `docker build` a secas sigue produciendo la imagen de producción.
+- Se ejecuta como root: aceptable porque **solo se usa en local**. Lo que se despliega es la etapa final, sin privilegios.
+
+**Desarrollo frente a producción en Compose**
+- **`compose.override.yaml`** se combina **automáticamente** con `compose.yaml` en `up`, `run`, `config`...
+- La base (`compose.yaml`) se parece a producción: imagen final y **Postgres sin publicar**. El override añade lo de desarrollo: `target: dev`, bind mounts, `--reload` y el puerto de Postgres.
+- `docker compose -f compose.yaml ...` usa solo la base e ignora el override.
+- `docker compose config` muestra la configuración final, combinada e interpolada. ⚠️ Incluye los secretos ya sustituidos.
+- Las imágenes de desarrollo y de producción llevan tags distintos (`:dev` y `:local`), para que no se pisen.
+
+**Tests en Compose**
+- `docker compose run --rm api pytest`: el mismo entorno que la API, con el código y los tests montados.
+- `run` arranca las dependencias (`depends_on`); `--no-deps` se las salta si no hacen falta.
+- **Los tests no deben depender del entorno en el que se ejecutan**: con `monkeypatch.delenv(..., raising=False)` se aíslan de las variables que defina Compose.
+
+### Comandos clave
+| Comando | Para qué |
+|---|---|
+| `docker compose config` | Ver la configuración final (base + override, interpolada) |
+| `docker compose -f compose.yaml up -d` | Levantar solo con la base (parecido a producción) |
+| `docker compose run --rm --no-deps api pytest -v` | Tests dentro de Compose, sin arrancar las dependencias |
+| `docker compose run --rm api ruff check` | Linter dentro de Compose |
+| `docker compose exec api python -c "import x; print(x.__file__)"` | Ver de dónde se importa un paquete |
+
+### Lecciones de depuración
+- Si uvicorn se recarga (los logs lo muestran) pero la respuesta no cambia, **comprobar de dónde se importa el código** (`__file__`).
+- Si un `curl -s` sale vacío justo después de guardar, probablemente pilló el servidor reiniciándose: repetirlo sin `-s`, o mirar los logs.
+- Si un test pasa "por casualidad" gracias a una variable de entorno, hay que aislarlo.

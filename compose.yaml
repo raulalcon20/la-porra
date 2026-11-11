@@ -7,8 +7,6 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - pgdata:/var/lib/postgresql
-    ports:
-      - "5432:5432"
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER}", "-d", "${POSTGRES_DB}"]
       interval: 5s
@@ -17,7 +15,7 @@ services:
       start_period: 10s
   api:
     build: ./services/api
-    image: porra-api:dev
+    image: porra-api:local
     environment:
       PORRA_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
       PORRA_ENVIRONMENT: development

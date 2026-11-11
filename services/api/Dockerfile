@@ -18,6 +18,15 @@ COPY README.md ./
 COPY src ./src
 RUN uv sync --frozen --no-dev --no-editable
 
+# etapa dev
+FROM builder AS dev
+
+RUN uv sync --frozen
+
+ENV PATH="/app/.venv/bin:$PATH"
+
+CMD ["uvicorn", "porra_api.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+
 # etapa runtime
 
 FROM python:3.13-slim 
