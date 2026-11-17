@@ -1,7 +1,7 @@
 # Diario del curso
 
 ## Estado actual
-- **Clase completada:** 6 · Docker Compose (6a y 6b)
+- **Clase completada:** 7 · El ingestor
 - **Entorno:** Windows 11 + WSL2 Ubuntu 22.04, Docker Desktop 4.97, uv 0.13.6, Python 3.13, Postgres 18
 - **Rutina al empezar:** abrir Docker Desktop → `cd ~/la-porra` → `eval "$(ssh-agent -s)" && ssh-add` → `git pull` → `code .` → `docker compose up -d`
 - **Rutina al cerrar:** `git add` y `git status` desde la raíz → commit y push → `docker compose down` (**nunca** `-v`, salvo para empezar de cero a propósito)
@@ -12,18 +12,28 @@
   - Imagen multi-stage sin privilegios, que ahora incluye `alembic.ini` y `migrations/`
   - `compose.yaml` en la raíz: `db` (postgres:18, volumen `pgdata`, healthcheck con `pg_isready`, puerto 5432) y `api` (build, `PORRA_DATABASE_URL` por interpolación con el host `db`, `depends_on` con `service_healthy`, puerto 8000)
   - `.env` (fuera de Git) y `.env.example` (en Git)
-    - Etapa `dev` en el Dockerfile (dependencias de desarrollo y paquete en modo editable)
+  - Etapa `dev` en el Dockerfile (dependencias de desarrollo y paquete en modo editable)
   - `compose.override.yaml` para desarrollo: build `target: dev` (imagen `porra-api:dev`), bind mounts de `src/` y `tests/`, `--reload` y puerto 5432 de `db`. La base `compose.yaml` usa la imagen final (`porra-api:local`) sin el puerto de Postgres.
   - Tests y ruff dentro de Compose: `docker compose run --rm --no-deps api pytest -v`
+  - Ingestor (`porra_api.ingestor`, misma imagen que la API, otro comando): `transformar.py` (función pura, con TDD), `cliente.py` (httpx, rate limit con cabeceras, reintentos en 429/5xx/red, sin reintentos en el resto de 4xx), `guardar.py` (upserts idempotentes) y `__main__.py` (argparse; temporada actual por defecto; una sola transacción)
+  - `db.py` con la fábrica de sesiones
+  - Servicio `ingestor` en Compose, con el perfil `tareas`: `docker compose run --rm ingestor`
+  - LaLiga 2026/27 importada: 380 partidos
+  - 11 tests (transformar y cliente, con `httpx.MockTransport`)
 - **Decisiones:**
   - Prefijo `PORRA_`; `PORRA_DATABASE_URL` obligatoria.
   - Postgres 18 con el volumen en `/var/lib/postgresql`.
   - Las credenciales de la base de datos tienen una sola fuente de verdad: el `.env`, interpolado en `compose.yaml`.
   - Las migraciones se ejecutan como un paso aparte (`docker compose run --rm api alembic upgrade head`), nunca en el `CMD`.
   - Tags: versión semántica + SHA; nunca se despliega `latest`.
+  - Arquitectura: el ingestor y el worker son módulos del mismo paquete (una imagen, varios comandos). El predictor será un servicio aparte que envía sus pronósticos a través de la API, como un jugador más.
+  - Cada proceso recibe solo los secretos que necesita (`IngestorSettings` con `SecretStr`; la API no tiene el token).
+  - El token de football-data está en `.env` (`FOOTBALL_DATA_TOKEN`). Atribución obligatoria: "Football data provided by the Football-Data.org API". No se usan los escudos.
+  - Los equipos se guardan con `shortName`. La regla de los 90 minutos está en `_goles_a_los_90`.
 - **Pendiente:** validar la configuración al arrancar (*fail fast*).
+ - Tests de integración de `guardar.py` contra Postgres (Clase 8).
 - **Ritmo:** el de las clases anteriores es el adecuado.
-- **Siguiente paso:** Clase 7 · El ingestor: datos reales de LaLiga
+- **Siguiente paso:** Clase 8a · Jugadores, pronósticos y puntuación.
 
 ## Cambios de alcance (decididos en la Clase 5b)
 - **Plataforma de porras multicompetición**: un jugador puede estar en varias porras; cada porra pertenece a una competición y una temporada. El pronóstico es por jugador y partido, compartido entre porras.
@@ -548,3 +558,56 @@
 - Si uvicorn se recarga (los logs lo muestran) pero la respuesta no cambia, **comprobar de dónde se importa el código** (`__file__`).
 - Si un `curl -s` sale vacío justo después de guardar, probablemente pilló el servidor reiniciándose: repetirlo sin `-s`, o mirar los logs.
 - Si un test pasa "por casualidad" gracias a una variable de entorno, hay que aislarlo.
+
+
+
+## Clase 7 · El ingestor
+
+### Teoría
+
+**Explorar una API antes de programar**
+- `curl -H "X-Auth-Token: $TOKEN"` + `jq` para formatear y filtrar JSON.
+- Los secretos no se escriben en la terminal: bash guarda los comandos en `~/.bash_history`. Se leen del `.env` en una variable: `TOKEN=$(grep VAR .env | cut -d= -f2)`.
+- Cabeceras de football-data: `X-Requests-Available-Minute` (peticiones que quedan) y `X-RequestCounter-Reset` (segundos hasta que se reinicia el contador). **Los nombres de las cabeceras no distinguen mayúsculas.** El cliente no supone cómo cuenta el servidor: lee las cabeceras en cada respuesta.
+- Los datos externos no son perfectos (un partido el 15 de agosto en una temporada que "empieza" el 16): no deducir nada que el propio dato no diga.
+- `curl -D - -o /dev/null`: ver solo las cabeceras de la respuesta.
+
+**Diseño del ingestor**
+- **Separar lo puro de lo impuro**: la lógica (transformar) en **funciones puras**, fáciles de testear; la red y la base de datos, en piezas finas alrededor.
+- **TDD**: primero los tests (la especificación), en rojo; después el código, hasta el verde. El test de la prórroga cazó un error real.
+- `@dataclass(frozen=True)`: estructura de datos inmutable.
+- `dato["campo"]` (falla si no existe) frente a `dato.get("campo")` (devuelve `None` sin avisar): para los campos obligatorios, **fallar de forma ruidosa**.
+- Arquitectura: una imagen y varios comandos (API, ingestor, worker) comparten el modelo de datos.
+
+**Cliente HTTP robusto**
+- **Qué se reintenta**: 429 (esperando lo que diga el servidor), 5xx y errores de red (con **backoff exponencial**). **El resto de 4xx no se reintenta**: el error está en la petición.
+- **Timeout siempre** (`httpx.Client(timeout=10)`): sin él, un servidor que no responde deja el proceso colgado.
+- **Inyección de dependencias** (`transport`, `dormir`): el mismo código, con la red y las esperas simuladas en los tests (`httpx.MockTransport`, `esperas.append`).
+- `logging` en lugar de `print`. Los niveles comunican: `info` para el funcionamiento normal, `warning` para lo que merece atención. Argumentos con `%` en lugar de f-strings.
+- El token, en una cabecera (no en la URL, donde acabaría en los logs).
+
+**Upsert idempotente (Postgres)**
+- `INSERT ... ON CONFLICT (col) DO UPDATE SET col = EXCLUDED.col`: insertar o actualizar en una sentencia atómica. `EXCLUDED` es la fila que se intentaba insertar.
+- SQLAlchemy: `from sqlalchemy.dialects.postgresql import insert` → `.on_conflict_do_update(index_elements=[...] o constraint="nombre", set_=...)`, y `.returning(Modelo.id)` + `scalar_one()`.
+- `do_nothing` + `RETURNING` no devuelve la fila si ya existía: un `update` que no cambia nada sí la devuelve.
+- Las restricciones con `NULLS NOT DISTINCT` se referencian por su **nombre**: aquí se ve la ventaja de la `NAMING_CONVENTION`.
+- **Idempotente**: ejecutarlo N veces da el mismo resultado que una (380 partidos tras cada ejecución).
+
+**Transacciones y configuración**
+- `with Sesion.begin() as sesion:`: una única transacción. `COMMIT` si todo va bien, `ROLLBACK` si algo falla: nunca queda una importación a medias. Primero se descarga y se transforma todo, después se escribe.
+- `IngestorSettings` aparte: **mínimo privilegio con los secretos**. `SecretStr` oculta el valor en logs y trazas (`.get_secret_value()` para usarlo).
+- `python -m paquete.modulo` ejecuta su `__main__.py`. `argparse` lee los argumentos y genera `--help`.
+- Los contenedores trabajan en **UTC**; la hora local, solo al mostrarla a las personas.
+
+**Compose**
+- `profiles: ["tareas"]`: el servicio no arranca con `up`, solo cuando se pide (`docker compose run --rm ingestor`). Es una tarea puntual, el futuro Job de Kubernetes.
+- La misma imagen con otro `command`. El token llega solo al servicio que lo necesita.
+
+### Comandos clave
+| Comando | Para qué |
+|---|---|
+| `curl -s -H "X-Auth-Token: $TOKEN" url \| jq '.campo'` | Explorar una API autenticada |
+| `curl -s -D - -o /dev/null url` | Ver solo las cabeceras de la respuesta |
+| `sudo apt install -y jq` | Instalar jq |
+| `docker compose run --rm ingestor [--competicion CL] [--temporada 2025]` | Ejecutar el ingestor |
+| `psql -P pager=off -c "..."` / `docker compose exec -T` | Evitar el paginador (`(END)` → salir con `q`) |
