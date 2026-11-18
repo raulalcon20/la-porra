@@ -1,39 +1,35 @@
 # Diario del curso
 
 ## Estado actual
-- **Clase completada:** 7 · El ingestor
+- **Clase completada:** 8a · Jugadores, pronósticos y puntuación
 - **Entorno:** Windows 11 + WSL2 Ubuntu 22.04, Docker Desktop 4.97, uv 0.13.6, Python 3.13, Postgres 18
 - **Rutina al empezar:** abrir Docker Desktop → `cd ~/la-porra` → `eval "$(ssh-agent -s)" && ssh-add` → `git pull` → `code .` → `docker compose up -d`
 - **Rutina al cerrar:** `git add` y `git status` desde la raíz → commit y push → `docker compose down` (**nunca** `-v`, salvo para empezar de cero a propósito)
-- **Repo:** `raulalcon20/la-porra` (privado), en `~/la-porra`. Nombre de producto pendiente: "La Porra" es el nombre en clave; la marca se cambiará sin tocar los nombres internos (dominio).
+- **Preferencia del alumno:** cuando haya que tocar un fichero, el tutor lo da **completo** (nunca trozos sueltos).
+- **Repo:** `raulalcon20/la-porra` (privado), en `~/la-porra`. "La Porra" es el nombre en clave; la marca se cambiará sin tocar los nombres internos.
 - **Hecho:**
-  - API FastAPI (`/health`, `/version`) con pydantic-settings, tests y ruff
-  - Modelo SQLAlchemy (7 tablas) y migración inicial de Alembic
-  - Imagen multi-stage sin privilegios, que ahora incluye `alembic.ini` y `migrations/`
-  - `compose.yaml` en la raíz: `db` (postgres:18, volumen `pgdata`, healthcheck con `pg_isready`, puerto 5432) y `api` (build, `PORRA_DATABASE_URL` por interpolación con el host `db`, `depends_on` con `service_healthy`, puerto 8000)
-  - `.env` (fuera de Git) y `.env.example` (en Git)
-  - Etapa `dev` en el Dockerfile (dependencias de desarrollo y paquete en modo editable)
-  - `compose.override.yaml` para desarrollo: build `target: dev` (imagen `porra-api:dev`), bind mounts de `src/` y `tests/`, `--reload` y puerto 5432 de `db`. La base `compose.yaml` usa la imagen final (`porra-api:local`) sin el puerto de Postgres.
-  - Tests y ruff dentro de Compose: `docker compose run --rm --no-deps api pytest -v`
-  - Ingestor (`porra_api.ingestor`, misma imagen que la API, otro comando): `transformar.py` (función pura, con TDD), `cliente.py` (httpx, rate limit con cabeceras, reintentos en 429/5xx/red, sin reintentos en el resto de 4xx), `guardar.py` (upserts idempotentes) y `__main__.py` (argparse; temporada actual por defecto; una sola transacción)
-  - `db.py` con la fábrica de sesiones
-  - Servicio `ingestor` en Compose, con el perfil `tareas`: `docker compose run --rm ingestor`
-  - LaLiga 2026/27 importada: 380 partidos
-  - 11 tests (transformar y cliente, con `httpx.MockTransport`)
+  - API FastAPI organizada en routers (`rutas/`): `/competiciones`, `/jugadores` (POST con token, GET `/yo`), `/partidos` (por jornada), `/pronosticos` (PUT upsert y GET mis pronósticos), `/health`, `/version`
+  - *Fail fast*: la configuración se valida al arrancar (`lifespan`)
+  - Autenticación: token aleatorio (`secrets`) devuelto una sola vez; en la base de datos solo se guarda su SHA-256 (`token_hash`, migración 2); cabecera `Authorization: Bearer`
+  - Reglas como funciones puras: `puntuacion.py` (3/1/0) y `reglas.py` (ventana de pronósticos: desde 7 días antes hasta el inicio)
+  - Dependencias de FastAPI: `SesionDep`, `JugadorActual`, `AhoraDep`
+  - Tests contra Postgres real (`porra_test`): transacción con rollback por test, `dependency_overrides`, fixture fábrica `crear_partido`. 43 tests.
+  - Ingestor con LaLiga 2026/27 (380 partidos). Plantilla de Alembic actualizada a la sintaxis moderna.
 - **Decisiones:**
   - Prefijo `PORRA_`; `PORRA_DATABASE_URL` obligatoria.
-  - Postgres 18 con el volumen en `/var/lib/postgresql`.
-  - Las credenciales de la base de datos tienen una sola fuente de verdad: el `.env`, interpolado en `compose.yaml`.
-  - Las migraciones se ejecutan como un paso aparte (`docker compose run --rm api alembic upgrade head`), nunca en el `CMD`.
-  - Tags: versión semántica + SHA; nunca se despliega `latest`.
-  - Arquitectura: el ingestor y el worker son módulos del mismo paquete (una imagen, varios comandos). El predictor será un servicio aparte que envía sus pronósticos a través de la API, como un jugador más.
-  - Cada proceso recibe solo los secretos que necesita (`IngestorSettings` con `SecretStr`; la API no tiene el token).
-  - El token de football-data está en `.env` (`FOOTBALL_DATA_TOKEN`). Atribución obligatoria: "Football data provided by the Football-Data.org API". No se usan los escudos.
-  - Los equipos se guardan con `shortName`. La regla de los 90 minutos está en `_goles_a_los_90`.
-- **Pendiente:** validar la configuración al arrancar (*fail fast*).
- - Tests de integración de `guardar.py` contra Postgres (Clase 8).
+  - Arquitectura: el ingestor y el worker son módulos del paquete (una imagen, varios comandos); el predictor será un servicio aparte que envía sus pronósticos por la API.
+  - Cada proceso recibe solo sus secretos (`IngestorSettings` con `SecretStr`).
+  - Los esquemas de Pydantic son el contrato público (no se exponen los modelos de SQLAlchemy). `es_maquina` no se puede fijar desde la API.
+  - Integridad en la base de datos (`UNIQUE` → 409); reglas de negocio en la API.
+  - Códigos: 401 (token), 404 (no existe), 409 (estado del partido), 422 (validación).
+  - Las migraciones se generan con `--user "$(id -u):$(id -g)"`.
+  - Postgres 18 con el volumen en `/var/lib/postgresql`. Las fechas, en UTC.
+- **Pendiente:**
+  - Tests de integración de `guardar.py` (ingestor) contra Postgres.
+  - Nadie puntúa todavía los pronósticos: lo hará el worker (Clase 9).
 - **Ritmo:** el de las clases anteriores es el adecuado.
-- **Siguiente paso:** Clase 8a · Jugadores, pronósticos y puntuación.
+- **Siguiente paso:** Clase 8b · Porras (crear, unirse con código de invitación, clasificación por porra, regla de La Máquina)
+
 
 ## Cambios de alcance (decididos en la Clase 5b)
 - **Plataforma de porras multicompetición**: un jugador puede estar en varias porras; cada porra pertenece a una competición y una temporada. El pronóstico es por jugador y partido, compartido entre porras.
@@ -611,3 +607,51 @@
 | `sudo apt install -y jq` | Instalar jq |
 | `docker compose run --rm ingestor [--competicion CL] [--temporada 2025]` | Ejecutar el ingestor |
 | `psql -P pager=off -c "..."` / `docker compose exec -T` | Evitar el paginador (`(END)` → salir con `q`) |
+
+
+
+## Clase 8a · Jugadores, pronósticos y puntuación
+
+### Teoría
+
+**Lógica de negocio como funciones puras**
+- `puntuar(pronostico, resultado)`: el orden importa (primero lo más específico, el exacto, y después el signo). Constantes con nombre (`PUNTOS_EXACTO`).
+- `ventana_pronosticos(inicio, ahora)`: recibe "ahora" como parámetro, así que se puede testear sin reloj. `StrEnum` para los estados.
+- **Tests parametrizados** (`@pytest.mark.parametrize` + `pytest.param(..., id=...)`): una tabla de casos que se lee como una especificación.
+- **Clases de equivalencia** (un representante de cada grupo de casos) y **valores frontera** (justo en cada límite y un instante a cada lado: `>=` frente a `>`).
+
+**FastAPI + Postgres**
+- **Inyección de dependencias** (`Depends`, alias con `Annotated`): una sesión por petición (`yield` + cierre garantizado); un engine (pool de conexiones) por proceso, con `lru_cache`.
+- Las sesiones no confirman solas: cada endpoint que escribe hace `sesion.commit()`.
+- **Esquemas de Pydantic** frente a modelos de SQLAlchemy: el contrato público, separado de la estructura de la base de datos. `from_attributes=True`.
+- Validación de entrada: `StringConstraints`, `Field(ge=, le=)` → **422** automático.
+- **Mass assignment**: no aceptar del cliente campos que dan privilegios (`es_maquina`). Pydantic ignora los campos que no están en el esquema.
+- **Routers** (`APIRouter(prefix, tags)`); parámetros de la URL a partir de los argumentos de la función.
+- `lifespan`: código al arrancar y al apagar → ***fail fast*** de la configuración.
+- `IntegrityError` → **409**: la base de datos garantiza la unicidad (sin condiciones de carrera) y la API traduce el error.
+- **`PUT` idempotente** (crea o modifica) frente a `POST` (crea).
+- Upsert con `.returning(Modelo)`; `sesion.get(Modelo, id)` busca por clave primaria.
+
+**Autenticación con tokens**
+- Token aleatorio con `secrets` (nunca con `random`), devuelto **una sola vez**. En la base de datos solo se guarda su **hash**: si se filtra la base de datos, los hashes no sirven para entrar.
+- SHA-256 (rápido) basta para tokens aleatorios de 32 bytes; para las contraseñas humanas, hashes **lentos** (bcrypt, argon2).
+- `HTTPBearer(auto_error=False)` + **401** con `WWW-Authenticate: Bearer`. El jugador sale del token, nunca del cuerpo de la petición.
+- Limitaciones: no caduca, el registro es libre y sin HTTPS el token viaja en claro (OAuth2/JWT para sistemas grandes).
+
+**Tests contra Postgres real**
+- Base de datos aparte (`porra_test`), creada con `createdb` y con un script en `/docker-entrypoint-initdb.d` para los volúmenes nuevos.
+- `scope="session"` para el engine (`create_all` una sola vez); `pytest.skip` si no hay base de datos.
+- **Cada test, dentro de una transacción que se deshace**: `join_transaction_mode="create_savepoint"` (el `commit` del endpoint solo confirma un savepoint).
+- `app.dependency_overrides` para la sesión y para la hora. `sesion.flush()` envía sin confirmar.
+- **Fixture fábrica** (`crear_partido`): devuelve una función que crea datos con valores por defecto razonables.
+- *Arrange-Act-Assert*. **Tests de regresión** (detectaron que se habían perdido `/health` y `/version`).
+
+**Migraciones**
+- Añadir una columna `NOT NULL` a una tabla con filas falla: ***expand and contract*** (añadirla admitiendo nulos → rellenarla → hacerla `NOT NULL`).
+- Mejor arreglar la plantilla (`script.py.mako`) que corregir cada migración. `--user "$(id -u):$(id -g)"` para que los ficheros generados en un bind mount sean tuyos.
+
+### Lecciones de depuración
+- **404** = la ruta no existe (¿se ha registrado el router?). **500** = una excepción (ver los logs).
+- Un `/docs` que se queda cargando con `--reload`: uvicorn ha fallado al importar el código. Los logs muestran el mismo error que los tests.
+- Un `ImportError` de un nombre concreto: ¿está definido en ese fichero? ¿Está guardado?
+- Mejor arreglar el código que silenciar el linter con `# noqa`.

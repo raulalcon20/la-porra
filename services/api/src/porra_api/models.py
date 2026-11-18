@@ -74,6 +74,7 @@ class Jugador(Base):
     nombre: Mapped[str] = mapped_column(String(50), unique=True)
     es_maquina: Mapped[bool] = mapped_column(server_default=false())
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
 
 
 class Porra(Base):
