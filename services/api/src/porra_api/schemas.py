@@ -4,6 +4,7 @@ from typing import Annotated
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 Nombre = Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=50)]
+NombrePorra = Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=100)]
 Goles = Annotated[int, Field(ge=0, le=20)]
 
 
@@ -55,3 +56,29 @@ class PronosticoOut(BaseModel):
     goles_local: int
     goles_visitante: int
     puntos: int | None
+
+
+class PorraCrear(BaseModel):
+    nombre: NombrePorra
+    temporada: int
+    competicion: str = "PD"
+
+
+class UnirsePorra(BaseModel):
+    codigo: str
+
+
+class PorraOut(BaseModel):
+    id: int
+    nombre: str
+    competicion: str
+    temporada: int
+    codigo_invitacion: str
+
+
+class FilaClasificacionOut(BaseModel):
+    posicion: int
+    nombre: str
+    es_maquina: bool
+    puntos: int
+    exactos: int

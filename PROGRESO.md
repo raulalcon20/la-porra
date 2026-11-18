@@ -1,34 +1,36 @@
 # Diario del curso
 
 ## Estado actual
-- **Clase completada:** 8a · Jugadores, pronósticos y puntuación
+- **Clase completada:** 8 · Las reglas de la porra (8a y 8b)
 - **Entorno:** Windows 11 + WSL2 Ubuntu 22.04, Docker Desktop 4.97, uv 0.13.6, Python 3.13, Postgres 18
 - **Rutina al empezar:** abrir Docker Desktop → `cd ~/la-porra` → `eval "$(ssh-agent -s)" && ssh-add` → `git pull` → `code .` → `docker compose up -d`
 - **Rutina al cerrar:** `git add` y `git status` desde la raíz → commit y push → `docker compose down` (**nunca** `-v`, salvo para empezar de cero a propósito)
 - **Preferencia del alumno:** cuando haya que tocar un fichero, el tutor lo da **completo** (nunca trozos sueltos).
 - **Repo:** `raulalcon20/la-porra` (privado), en `~/la-porra`. "La Porra" es el nombre en clave; la marca se cambiará sin tocar los nombres internos.
+- **Mapa del proyecto:** artefacto "Mapa de La Porra" (repositorio, contenedores, capas de la API, ingestor y tests). Se actualiza al avanzar.
 - **Hecho:**
-  - API FastAPI organizada en routers (`rutas/`): `/competiciones`, `/jugadores` (POST con token, GET `/yo`), `/partidos` (por jornada), `/pronosticos` (PUT upsert y GET mis pronósticos), `/health`, `/version`
-  - *Fail fast*: la configuración se valida al arrancar (`lifespan`)
-  - Autenticación: token aleatorio (`secrets`) devuelto una sola vez; en la base de datos solo se guarda su SHA-256 (`token_hash`, migración 2); cabecera `Authorization: Bearer`
-  - Reglas como funciones puras: `puntuacion.py` (3/1/0) y `reglas.py` (ventana de pronósticos: desde 7 días antes hasta el inicio)
-  - Dependencias de FastAPI: `SesionDep`, `JugadorActual`, `AhoraDep`
-  - Tests contra Postgres real (`porra_test`): transacción con rollback por test, `dependency_overrides`, fixture fábrica `crear_partido`. 43 tests.
-  - Ingestor con LaLiga 2026/27 (380 partidos). Plantilla de Alembic actualizada a la sintaxis moderna.
+  - API organizada en routers: `/competiciones`, `/jugadores` (registro con token, `/yo`), `/partidos`, `/pronosticos` (PUT upsert, mis pronósticos), `/porras` (crear, unirse con código, mis porras, clasificación), `/health`, `/version`
+  - Autenticación con token (en la base de datos, solo su SHA-256). Códigos de invitación de 8 caracteres sin ambiguos, con `secrets`.
+  - Reglas puras: `puntuacion.py` (3/1/0), `reglas.py` (ventana de 7 días), `clasificacion.py` (desempate por exactos, ranking de competición 1-2-2-4)
+  - Clasificación calculada en SQL: subconsulta con `SUM` y `COUNT FILTER` + `LEFT JOIN` a los miembros
+  - La Máquina solo puede jugar en ligas (403)
+  - 3 migraciones: esquema inicial, token de jugador, código de invitación
+  - Ingestor con LaLiga 2026/27 (380 partidos)
+  - 67 tests (lógica pura, cliente HTTP con mocks y API contra Postgres real)
 - **Decisiones:**
-  - Prefijo `PORRA_`; `PORRA_DATABASE_URL` obligatoria.
-  - Arquitectura: el ingestor y el worker son módulos del paquete (una imagen, varios comandos); el predictor será un servicio aparte que envía sus pronósticos por la API.
-  - Cada proceso recibe solo sus secretos (`IngestorSettings` con `SecretStr`).
-  - Los esquemas de Pydantic son el contrato público (no se exponen los modelos de SQLAlchemy). `es_maquina` no se puede fijar desde la API.
+  - Prefijo `PORRA_`; `PORRA_DATABASE_URL` obligatoria; *fail fast* en `lifespan`.
+  - Arquitectura: ingestor y worker como módulos del paquete (una imagen, varios comandos); el predictor será un servicio aparte que pronostica por la API.
+  - Cada proceso recibe solo sus secretos.
+  - Esquemas de Pydantic como contrato público; `es_maquina` no se puede fijar desde la API.
   - Integridad en la base de datos (`UNIQUE` → 409); reglas de negocio en la API.
-  - Códigos: 401 (token), 404 (no existe), 409 (estado del partido), 422 (validación).
-  - Las migraciones se generan con `--user "$(id -u):$(id -g)"`.
-  - Postgres 18 con el volumen en `/var/lib/postgresql`. Las fechas, en UTC.
+  - Códigos: 401 (token), 403 (no permitido), 404 (no existe o no es tuyo), 409 (estado), 422 (validación).
+  - Un pronóstico por jugador y partido, compartido entre porras.
+  - Postgres 18 con el volumen en `/var/lib/postgresql`. Fechas en UTC.
 - **Pendiente:**
   - Tests de integración de `guardar.py` (ingestor) contra Postgres.
   - Nadie puntúa todavía los pronósticos: lo hará el worker (Clase 9).
 - **Ritmo:** el de las clases anteriores es el adecuado.
-- **Siguiente paso:** Clase 8b · Porras (crear, unirse con código de invitación, clasificación por porra, regla de La Máquina)
+- **Siguiente paso:** Clase 9 · Redis y el worker (puntuar jornadas)
 
 
 ## Cambios de alcance (decididos en la Clase 5b)
@@ -655,3 +657,31 @@
 - Un `/docs` que se queda cargando con `--reload`: uvicorn ha fallado al importar el código. Los logs muestran el mismo error que los tests.
 - Un `ImportError` de un nombre concreto: ¿está definido en ese fichero? ¿Está guardado?
 - Mejor arreglar el código que silenciar el linter con `# noqa`.
+
+
+
+## Clase 8b · Las porras
+
+### Teoría
+
+**Códigos de invitación**
+- Aleatorios con `secrets.choice` (nunca `random`), de 8 caracteres de un alfabeto sin ambiguos (sin 0/O, 1/I/L): 31⁸ ≈ 850.000 millones de combinaciones.
+- `UNIQUE` en la base de datos: aunque la colisión es casi imposible, nunca puede haber dos porras con el mismo código.
+- Ser flexible con lo que escriben las personas (`strip`, `upper`) y estricto con lo que se guarda.
+
+**Clasificación: SQL suma, Python ordena**
+- Dato derivado: no se guarda, se calcula.
+- Subconsulta con `GROUP BY jugador_id`, `SUM(puntos)` (ignora los `NULL`: pronósticos sin puntuar) y `COUNT(*) FILTER (WHERE puntos = 3)`, limitada a la competición y temporada de la porra.
+- **`LEFT JOIN`** (`outerjoin`) de los miembros con la subconsulta + `COALESCE(..., 0)`: los miembros sin pronósticos aparecen con 0. Con un `JOIN` normal, desaparecerían.
+- Posiciones con una función pura: desempate por exactos, y **ranking de competición** (1, 2, 2, 4) frente a ranking denso (1, 2, 2, 3). La regla vive en una sola línea.
+- Se usan las constantes (`PUNTOS_EXACTO`) en lugar de números escritos a mano.
+
+**Endpoints de porras**
+- `flush()` para obtener el `id` antes del `commit`; un solo `commit` para la porra y su primer miembro (todo o nada).
+- Unirse es idempotente con `on_conflict_do_nothing`: si ya eres miembro, no hay nada que actualizar (a diferencia del ingestor, donde ignorar el conflicto habría perdido datos).
+- `sesion.get(Modelo, (a, b))` para claves primarias compuestas.
+- **403**: sé quién eres, pero no puedes hacerlo (La Máquina en una copa).
+- **404 en lugar de 403** para recursos ajenos: no confirmar que existen.
+
+### Lecciones de depuración
+- Mirar el **número de tests recogidos**, no solo que estén en verde: un fichero de tests que no existe no falla, simplemente no se ejecuta.

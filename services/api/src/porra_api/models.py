@@ -73,8 +73,8 @@ class Jugador(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     nombre: Mapped[str] = mapped_column(String(50), unique=True)
     es_maquina: Mapped[bool] = mapped_column(server_default=false())
-    creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class Porra(Base):
@@ -82,6 +82,7 @@ class Porra(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     nombre: Mapped[str] = mapped_column(String(100))
+    codigo_invitacion: Mapped[str] = mapped_column(String(8), unique=True)
     competicion_id: Mapped[int] = mapped_column(ForeignKey("competiciones.id", ondelete="RESTRICT"))
     temporada: Mapped[int]
     creada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
