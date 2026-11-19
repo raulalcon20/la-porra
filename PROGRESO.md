@@ -1,37 +1,32 @@
 # Diario del curso
 
 ## Estado actual
-- **Clase completada:** 8 · Las reglas de la porra (8a y 8b)
-- **Entorno:** Windows 11 + WSL2 Ubuntu 22.04, Docker Desktop 4.97, uv 0.13.6, Python 3.13, Postgres 18
+- **Clase completada:** 9 · Redis y el worker (9a y 9b)
+- **Entorno:** Windows 11 + WSL2 Ubuntu 22.04, Docker Desktop 4.97, uv 0.13.6, Python 3.13, Postgres 18, Redis 8, RQ 3
 - **Rutina al empezar:** abrir Docker Desktop → `cd ~/la-porra` → `eval "$(ssh-agent -s)" && ssh-add` → `git pull` → `code .` → `docker compose up -d`
 - **Rutina al cerrar:** `git add` y `git status` desde la raíz → commit y push → `docker compose down` (**nunca** `-v`, salvo para empezar de cero a propósito)
 - **Preferencia del alumno:** cuando haya que tocar un fichero, el tutor lo da **completo** (nunca trozos sueltos).
 - **Repo:** `raulalcon20/la-porra` (privado), en `~/la-porra`. "La Porra" es el nombre en clave; la marca se cambiará sin tocar los nombres internos.
-- **Mapa del proyecto:** artefacto "Mapa de La Porra" (repositorio, contenedores, capas de la API, ingestor y tests). Se actualiza al avanzar.
+- **Mapa del proyecto:** artefacto "Mapa de La Porra". Pendiente de añadir Redis y el worker.
 - **Hecho:**
-  - API organizada en routers: `/competiciones`, `/jugadores` (registro con token, `/yo`), `/partidos`, `/pronosticos` (PUT upsert, mis pronósticos), `/porras` (crear, unirse con código, mis porras, clasificación), `/health`, `/version`
-  - Autenticación con token (en la base de datos, solo su SHA-256). Códigos de invitación de 8 caracteres sin ambiguos, con `secrets`.
-  - Reglas puras: `puntuacion.py` (3/1/0), `reglas.py` (ventana de 7 días), `clasificacion.py` (desempate por exactos, ranking de competición 1-2-2-4)
-  - Clasificación calculada en SQL: subconsulta con `SUM` y `COUNT FILTER` + `LEFT JOIN` a los miembros
-  - La Máquina solo puede jugar en ligas (403)
-  - 3 migraciones: esquema inicial, token de jugador, código de invitación
-  - Ingestor con LaLiga 2026/27 (380 partidos)
-  - 67 tests (lógica pura, cliente HTTP con mocks y API contra Postgres real)
+  - API: `/competiciones`, `/jugadores`, `/partidos`, `/pronosticos`, `/porras` (crear, unirse, clasificación), `/health`, `/version`
+  - Ingestor: descarga LaLiga, upsert idempotente y, **después del commit**, encola las jornadas con partidos terminados y pronósticos sin puntuar
+  - Worker (RQ sobre Redis, cola `porra`): `tarea_puntuar_jornada` (idempotente, una transacción), con reintentos a los 10, 30 y 60 s (`--with-scheduler`). Herramientas: `python -m porra_api.worker.encolar <ids>` y `...worker.demo`
+  - Compose: `db`, `redis` (sin volumen: la cola no es la fuente de verdad), `api`, `worker` (escalable), `ingestor` (perfil `tareas`)
+  - 3 migraciones. 72 tests.
 - **Decisiones:**
-  - Prefijo `PORRA_`; `PORRA_DATABASE_URL` obligatoria; *fail fast* en `lifespan`.
+  - Prefijo `PORRA_`; *fail fast* en `lifespan`. Cada proceso recibe solo su configuración (`WorkerSettings`, `IngestorSettings`).
   - Arquitectura: ingestor y worker como módulos del paquete (una imagen, varios comandos); el predictor será un servicio aparte que pronostica por la API.
-  - Cada proceso recibe solo sus secretos.
-  - Esquemas de Pydantic como contrato público; `es_maquina` no se puede fijar desde la API.
-  - Integridad en la base de datos (`UNIQUE` → 409); reglas de negocio en la API.
-  - Códigos: 401 (token), 403 (no permitido), 404 (no existe o no es tuyo), 409 (estado), 422 (validación).
-  - Un pronóstico por jugador y partido, compartido entre porras.
+  - Las tareas reciben datos simples (ids) y abren su propia sesión. Son idempotentes: recalculan, no suman.
+  - El trabajo pendiente se puede reconstruir desde Postgres (`jornadas_por_puntuar`), así que perder la cola no es grave.
+  - Esquemas de Pydantic como contrato público; códigos 401/403/404/409/422.
   - Postgres 18 con el volumen en `/var/lib/postgresql`. Fechas en UTC.
 - **Pendiente:**
   - Tests de integración de `guardar.py` (ingestor) contra Postgres.
-  - Nadie puntúa todavía los pronósticos: lo hará el worker (Clase 9).
+  - Si football-data corrige un resultado ya puntuado, no se detecta automáticamente (se puede encolar a mano).
+  - `notificar_resumen`: se hará con el bot (Clase 11).
 - **Ritmo:** el de las clases anteriores es el adecuado.
-- **Siguiente paso:** Clase 9 · Redis y el worker (puntuar jornadas)
-
+- **Siguiente paso:** Clase 10a · La Máquina: el modelo de Poisson
 
 ## Cambios de alcance (decididos en la Clase 5b)
 - **Plataforma de porras multicompetición**: un jugador puede estar en varias porras; cada porra pertenece a una competición y una temporada. El pronóstico es por jugador y partido, compartido entre porras.
@@ -685,3 +680,49 @@
 
 ### Lecciones de depuración
 - Mirar el **número de tests recogidos**, no solo que estén en verde: un fichero de tests que no existe no falla, simplemente no se ejecuta.
+
+
+
+## Clase 9 · Redis y el worker
+
+### Teoría
+
+**Colas de tareas (productor-consumidor)**
+- El productor (ingestor, API) encola y sigue: encolar 10 tareas tardó 20 ms; hacerlas, 20 s.
+- **Redis**: base de datos en memoria, usada como cola. **RQ**: encolar una función de Python con sus argumentos; un worker la ejecuta.
+- Modelo **pull**: cada worker, al quedar libre, va a buscar la siguiente tarea. Sacar de la cola es atómico: dos workers nunca hacen la misma.
+- RQ hace un `fork` por tarea (*work horse*): si la tarea muere, el worker sobrevive. Por eso el pid cambia en cada tarea.
+- Escalar: `docker compose up -d --scale worker=3`. El tiempo depende de las **rondas** (10 tareas, 3 workers → 4 rondas → 8 s, no 6,7).
+- Los workers se escalan sin problemas porque no publican puertos. La API, con `ports: 8000:8000`, no (en Kubernetes lo resuelve un Service).
+- Con varios workers, solo uno ejecuta el **planificador** (*scheduler lock* en Redis): exclusión mutua distribuida.
+
+**Diseño de tareas**
+- Reciben **datos simples** (ids), no objetos ni sesiones: se ejecutan en otro proceso, más tarde. Abren su propia sesión.
+- **Idempotentes**: se pueden ejecutar más de una vez (reintentos, duplicados). Recalcular en lugar de sumar.
+- La tarea es una envoltura fina (sesión + transacción) alrededor de una lógica testeable.
+- **Encolar después del commit**: si no, el worker podría leer datos aún sin confirmar.
+- Redis sin volumen: **la cola no es la fuente de verdad**. Lo pendiente se reconstruye desde Postgres (`jornadas_por_puntuar`).
+
+**Reintentos y fallos**
+- `Retry(max=3, interval=[10, 30, 60])` + `rq worker --with-scheduler`. Backoff creciente: da tiempo a que la avería se arregle.
+- Comprobado: con Postgres parado, la tarea falló 3 veces (error de DNS) y el 4.º intento, ya con Postgres levantado, funcionó solo.
+- Si se agotan los reintentos → registro de fallidas. Recuperarlas: `rq requeue --all --queue porra --url ...`.
+
+**SQL**
+- `IS NULL` / `IS NOT NULL` (`.is_(None)`, `.is_not(None)`): `= NULL` nunca es cierto.
+- `.distinct()` para no repetir filas.
+
+### Comandos clave
+| Comando | Para qué |
+|---|---|
+| `docker compose up -d --scale worker=3` | Varias réplicas de un servicio |
+| `docker compose restart worker` | Recargar el código del worker (no tiene hot reload) |
+| `docker compose run --rm --no-deps worker python -m porra_api.worker.encolar 1` | Encolar una jornada a mano |
+| `docker compose run --rm --no-deps worker python -m porra_api.worker.demo 10` | Demo de reparto entre workers |
+| `docker compose exec worker rq requeue --all --queue porra --url redis://redis:6379/0` | Reencolar las tareas fallidas |
+| `docker compose stop db` / `start db` | Simular una caída de Postgres |
+
+### Lecciones de depuración
+- Dos ficheros con el mismo nombre (`worker/config.py` e `ingestor/config.py`): fijarse siempre en la **ruta completa**.
+- Un import roto puede no salir en los tests si ningún test pasa por ese módulo: ejecutar también el programa de verdad.
+- `--user "$(id -u):$(id -g)"` con un UID que no existe en la imagen: no hay *home*, y los programas que escriben en él (uv) fallan.

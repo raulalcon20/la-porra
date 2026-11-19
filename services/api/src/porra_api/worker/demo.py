@@ -1,13 +1,9 @@
 import argparse
 import time
 
-from redis import Redis
-from rq import Queue
-
+from porra_api.worker.cola import obtener_cola
 from porra_api.worker.config import WorkerSettings
 from porra_api.worker.tareas import tarea_lenta
-
-NOMBRE_COLA = "porra"
 
 
 def main() -> None:
@@ -15,7 +11,7 @@ def main() -> None:
     parser.add_argument("cuantas", type=int, nargs="?", default=10)
     args = parser.parse_args()
 
-    cola = Queue(NOMBRE_COLA, connection=Redis.from_url(WorkerSettings().redis_url))
+    cola = obtener_cola(WorkerSettings().redis_url)
     inicio = time.monotonic()
     trabajos = [cola.enqueue(tarea_lenta, numero) for numero in range(1, args.cuantas + 1)]
     print(f"Encoladas {len(trabajos)} tareas en {time.monotonic() - inicio:.3f} s")

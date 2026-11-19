@@ -2,8 +2,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class WorkerSettings(BaseSettings):
-    """Configuración de la cola de tareas, leída de variables con prefijo PORRA_."""
+    """Configuración del worker, leída de variables con prefijo PORRA_."""
 
     model_config = SettingsConfigDict(env_prefix="PORRA_")
 
+    database_url: str
     redis_url: str

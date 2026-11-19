@@ -8,5 +8,6 @@ class IngestorSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="PORRA_")
 
     database_url: str
+    redis_url: str
     football_data_token: SecretStr
     football_data_url: str = "https://api.football-data.org/v4"
