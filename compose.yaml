@@ -62,5 +62,15 @@ services:
         condition: service_healthy
     profiles: ["tareas"]
 
+  predictor:
+    build: ./services/predictor
+    image: porra-predictor:local
+    environment:
+      PORRA_API_URL: http://api:8000
+      PORRA_MAQUINA_TOKEN: ${MAQUINA_TOKEN}
+    depends_on:
+      - api
+    profiles: ["tareas"]
+
 volumes:
   pgdata:

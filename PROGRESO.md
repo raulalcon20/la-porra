@@ -1,32 +1,36 @@
 # Diario del curso
 
 ## Estado actual
-- **Clase completada:** 9 · Redis y el worker (9a y 9b)
+- **Clase completada:** 10 · La Máquina (10a, 10c y 10b)
 - **Entorno:** Windows 11 + WSL2 Ubuntu 22.04, Docker Desktop 4.97, uv 0.13.6, Python 3.13, Postgres 18, Redis 8, RQ 3
-- **Rutina al empezar:** abrir Docker Desktop → `cd ~/la-porra` → `eval "$(ssh-agent -s)" && ssh-add` → `git pull` → `code .` → `docker compose up -d`
+- **Rutina al empezar:** abrir Docker Desktop → `cd ~/la-porra` → `eval "$(ssh-agent -s)" && ssh-add` → `git pull` → `code .` (y `code services/predictor` para el predictor) → `docker compose up -d`
 - **Rutina al cerrar:** `git add` y `git status` desde la raíz → commit y push → `docker compose down` (**nunca** `-v`, salvo para empezar de cero a propósito)
-- **Preferencia del alumno:** cuando haya que tocar un fichero, el tutor lo da **completo** (nunca trozos sueltos).
+- **Preferencias del alumno:**
+  - Cuando haya que tocar un fichero, el tutor lo da **completo** (nunca trozos sueltos).
+  - Cada paso lleva **una única versión** de cada comando, revisada antes de darla (nada de "mejor usa este otro" después).
 - **Repo:** `raulalcon20/la-porra` (privado), en `~/la-porra`. "La Porra" es el nombre en clave; la marca se cambiará sin tocar los nombres internos.
-- **Mapa del proyecto:** artefacto "Mapa de La Porra". Pendiente de añadir Redis y el worker.
+- **Mapa del proyecto:** artefacto "Mapa de La Porra". Pendiente de añadir el predictor.
 - **Hecho:**
-  - API: `/competiciones`, `/jugadores`, `/partidos`, `/pronosticos`, `/porras` (crear, unirse, clasificación), `/health`, `/version`
-  - Ingestor: descarga LaLiga, upsert idempotente y, **después del commit**, encola las jornadas con partidos terminados y pronósticos sin puntuar
-  - Worker (RQ sobre Redis, cola `porra`): `tarea_puntuar_jornada` (idempotente, una transacción), con reintentos a los 10, 30 y 60 s (`--with-scheduler`). Herramientas: `python -m porra_api.worker.encolar <ids>` y `...worker.demo`
-  - Compose: `db`, `redis` (sin volumen: la cola no es la fuente de verdad), `api`, `worker` (escalable), `ingestor` (perfil `tareas`)
-  - 3 migraciones. 72 tests.
+  - API (`services/api`): competiciones, jugadores, partidos, pronósticos, porras con clasificación. Herramientas de administración: `python -m porra_api.crear_maquina` y `python -m porra_api.nuevo_token <nombre>`
+  - Ingestor y worker (RQ sobre Redis): descarga, upsert y puntuación en segundo plano, con reintentos
+  - **Predictor** (`services/predictor`, proyecto e imagen aparte, 589 MB): modelo de Poisson con fuerzas de ataque y defensa en casa y fuera, ventana de 2 años, pronóstico que maximiza los puntos esperados. Descarga los CSV de football-data.co.uk en cada ejecución, traduce los nombres (`equipos.py`, *fail fast*) y pronostica por la API con el token de La Máquina. `--simular` para no enviar nada.
+  - Backtest (walk-forward): La Máquina 284 y 290 pts en 2024/25 y 2025/26, frente a 275 y 274 de "siempre 1-0"
+  - La Máquina, miembro de la "Porra de prueba", ha pronosticado la jornada 13
+  - Compose: `db`, `redis`, `api`, `worker`, `ingestor` y `predictor` (estos dos, con el perfil `tareas`)
+  - 72 tests en la API y 14 en el predictor
 - **Decisiones:**
-  - Prefijo `PORRA_`; *fail fast* en `lifespan`. Cada proceso recibe solo su configuración (`WorkerSettings`, `IngestorSettings`).
-  - Arquitectura: ingestor y worker como módulos del paquete (una imagen, varios comandos); el predictor será un servicio aparte que pronostica por la API.
-  - Las tareas reciben datos simples (ids) y abren su propia sesión. Son idempotentes: recalculan, no suman.
-  - El trabajo pendiente se puede reconstruir desde Postgres (`jornadas_por_puntuar`), así que perder la cola no es grave.
-  - Esquemas de Pydantic como contrato público; códigos 401/403/404/409/422.
-  - Postgres 18 con el volumen en `/var/lib/postgresql`. Fechas en UTC.
+  - Prefijo `PORRA_`; *fail fast*; cada proceso recibe solo sus secretos (`MAQUINA_TOKEN` solo para el predictor).
+  - La Máquina no tiene privilegios: pronostica por la API, con las mismas reglas. Solo se crea con una herramienta de administración.
+  - El predictor tiene su propia copia de las reglas de puntuación (documentada), porque es un proyecto aparte.
+  - Modelo base, sin ponderación temporal ni ascendidos: las dos mejoras se midieron y no ganaron (la ponderación con vida media de 180 días empeoró; los ascendidos solo cambiaron 4 pronósticos). Quedan en el código, desactivadas.
+  - Tags: versión semántica + SHA; nunca se despliega `latest`. Postgres 18 con el volumen en `/var/lib/postgresql`. Fechas en UTC.
 - **Pendiente:**
   - Tests de integración de `guardar.py` (ingestor) contra Postgres.
-  - Si football-data corrige un resultado ya puntuado, no se detecta automáticamente (se puede encolar a mano).
-  - `notificar_resumen`: se hará con el bot (Clase 11).
+  - Resultados corregidos ya puntuados: no se detectan automáticamente.
+  - `notificar_resumen`: con el bot (Clase 11).
+  - Extensión al final del curso: Dixon-Coles (con *shrinkage* para ascendidos y ponderación temporal).
 - **Ritmo:** el de las clases anteriores es el adecuado.
-- **Siguiente paso:** Clase 10a · La Máquina: el modelo de Poisson
+- **Siguiente paso:** Clase 11 · El bot de Telegram
 
 ## Cambios de alcance (decididos en la Clase 5b)
 - **Plataforma de porras multicompetición**: un jugador puede estar en varias porras; cada porra pertenece a una competición y una temporada. El pronóstico es por jugador y partido, compartido entre porras.
@@ -726,3 +730,54 @@
 - Dos ficheros con el mismo nombre (`worker/config.py` e `ingestor/config.py`): fijarse siempre en la **ruta completa**.
 - Un import roto puede no salir en los tests si ningún test pasa por ese módulo: ejecutar también el programa de verdad.
 - `--user "$(id -u):$(id -g)"` con un UID que no existe en la imagen: no hay *home*, y los programas que escriben en él (uv) fallan.
+
+
+
+## Clase 10 · La Máquina
+
+### Teoría
+
+**Datos con pandas**
+- DataFrame (tabla) y Serie (columna). Operaciones sobre columnas enteras, sin bucles: `mean()`, `value_counts(normalize=True)`, `groupby(...)`.
+- `(condición).mean()` = proporción de filas que la cumplen.
+- `read_csv(usecols=...)`, `rename`, `dropna`, `to_datetime(dayfirst=True)`, `assign` (DataFrame nuevo sin modificar el original).
+- LaLiga (2.019 partidos): el local marca 1,49 y el visitante 1,13; gana el local el 45,6 %, empate 26,2 %; el marcador más frecuente es el 1-1 (13,5 %).
+
+**Modelo de Poisson**
+- Los goles de un equipo siguen una Poisson de media λ. λ = media de la liga × ataque propio × defensa rival, en casa y fuera.
+- Fuerzas relativas: 1,0 = equipo medio. Un equipo sin historia cuenta como uno medio.
+- Matriz de marcadores: `np.outer` de las dos Poisson (supone independencia).
+- numpy vectorizado: `np.tril`/`np.triu`/`np.trace` (victorias locales, visitantes, empates), `np.where`, `np.argmax` + `np.unravel_index`.
+
+**Maximizar los puntos esperados**
+- Puntos esperados = P(signo) + 2 · P(exacto). **Lo más probable no es lo que más puntúa**: "siempre 1-1" (el marcador más frecuente) da 0,53 pts/partido; "siempre 1-0", 0,71.
+- La Máquina casi nunca pronostica empates: es el signo menos probable. Su ventaja está en los signos (por ejemplo, pronostica 0-1 cuando el visitante es mejor).
+
+**Evaluación**
+- **Fuga de datos** (*data leakage*): entrenar con los resultados que se quieren predecir. Se evita con **backtesting walk-forward**: cada día, entrenar solo con lo anterior.
+- **Baselines**: un modelo solo vale si gana a estrategias tontas. Resultado: La Máquina gana a "siempre 1-0" por un 3-6 %. El fútbol es muy aleatorio.
+- **Sesgo-varianza**: la ponderación temporal (más peso a lo reciente) empeoró porque reduce los datos efectivos y las estimaciones se vuelven ruidosas.
+- **Sobreajuste**: fijar los parámetros antes de mirar (vida media 180 días) y no probar valores hasta que salga bien. Un resultado negativo bien medido también es un resultado.
+- `pytest.approx` para comparar decimales (coma flotante).
+
+**Integración**
+- **Resolución de entidades**: los mismos equipos con nombres distintos en dos fuentes (`Atleti`/`Ath Madrid`). Tabla de equivalencias con *fail fast*: un nombre sin traducir convertiría al equipo en "medio" sin avisar.
+- La Máquina es un **cliente de la API**: mismas reglas que los humanos (409 fuera de plazo). Se crea con una herramienta de administración (la API no deja registrarse como máquina).
+- Los tokens perdidos no se recuperan (solo se guarda el hash): se generan nuevos y el antiguo queda revocado.
+- **`ENTRYPOINT`** (parte fija; lo que se escribe después del servicio se añade como argumentos) frente a **`CMD`** (se sustituye entero).
+- Imagen aparte por las dependencias pesadas (589 MB frente a 204 MB de la API).
+- Los datos no van a Git ni a la imagen: se descargan en cada ejecución (`tempfile.TemporaryDirectory`). Truco de `.gitignore` con `*` y `!.gitignore`.
+- `--simular` (*dry run*) en las herramientas que cambian datos.
+
+### Comandos clave
+| Comando | Para qué |
+|---|---|
+| `uv run python -m porra_predictor.explorar` | Estadísticas de los históricos |
+| `uv run python -m porra_predictor.backtest` | Evaluar el modelo frente a los baselines |
+| `docker compose run --rm predictor --temporada 2026 --jornada 13 [--simular]` | La Máquina pronostica una jornada |
+| `docker compose run --rm api python -m porra_api.crear_maquina` | Crear a La Máquina |
+| `docker compose run --rm api python -m porra_api.nuevo_token <nombre>` | Generar un token nuevo para un jugador |
+
+### Lecciones de depuración
+- `uv run` depende de la carpeta actual: con dos proyectos, comprobar siempre dónde estás.
+- Ante un resultado sospechoso (dos variantes con exactamente los mismos puntos), comprobarlo con datos (cuántos pronósticos cambian) en lugar de suponer.
