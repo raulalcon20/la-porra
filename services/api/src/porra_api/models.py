@@ -1,6 +1,7 @@
 from datetime import datetime
 
 from sqlalchemy import (
+    BigInteger,
     DateTime,
     ForeignKey,
     MetaData,
@@ -74,6 +75,7 @@ class Jugador(Base):
     nombre: Mapped[str] = mapped_column(String(50), unique=True)
     es_maquina: Mapped[bool] = mapped_column(server_default=false())
     token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    telegram_id: Mapped[int | None] = mapped_column(BigInteger, unique=True)
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -85,6 +87,7 @@ class Porra(Base):
     codigo_invitacion: Mapped[str] = mapped_column(String(8), unique=True)
     competicion_id: Mapped[int] = mapped_column(ForeignKey("competiciones.id", ondelete="RESTRICT"))
     temporada: Mapped[int]
+    telegram_chat_id: Mapped[int | None] = mapped_column(BigInteger, unique=True)
     creada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

@@ -12,11 +12,14 @@ from porra_api.dependencias import get_sesion
 from porra_api.main import app
 from porra_api.models import Base, Competicion, Jornada, Partido
 
+SECRETO_BOT = "secreto-del-bot-de-test"
+
 
 @pytest.fixture(autouse=True)
 def entorno_de_test(monkeypatch):
     """Configuración mínima para todos los tests, con la caché de settings limpia."""
     monkeypatch.setenv("PORRA_DATABASE_URL", "postgresql+psycopg://test:test@localhost:5432/test")
+    monkeypatch.setenv("PORRA_BOT_SECRETO", SECRETO_BOT)
     monkeypatch.delenv("PORRA_ENVIRONMENT", raising=False)
     get_settings.cache_clear()
     yield
@@ -53,6 +56,19 @@ def cliente(sesion):
     app.dependency_overrides[get_sesion] = lambda: sesion
     yield TestClient(app)
     app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def como_bot():
+    """Fábrica de cabeceras del bot, opcionalmente en nombre de un usuario de Telegram."""
+
+    def _cabeceras(telegram_id: int | None = None) -> dict[str, str]:
+        cabeceras = {"X-Bot-Secreto": SECRETO_BOT}
+        if telegram_id is not None:
+            cabeceras["X-Telegram-Usuario"] = str(telegram_id)
+        return cabeceras
+
+    return _cabeceras
 
 
 @pytest.fixture

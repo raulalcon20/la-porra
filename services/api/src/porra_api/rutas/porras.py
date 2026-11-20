@@ -1,13 +1,14 @@
 from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from porra_api.clasificacion import FilaClasificacion, con_posiciones
 from porra_api.dependencias import JugadorActual, SesionDep
 from porra_api.models import Competicion, Jornada, Jugador, Miembro, Partido, Porra, Pronostico
 from porra_api.puntuacion import PUNTOS_EXACTO
-from porra_api.schemas import FilaClasificacionOut, PorraCrear, PorraOut, UnirsePorra
+from porra_api.schemas import FilaClasificacionOut, PorraCrear, PorraOut, UnirsePorra, VincularChat
 from porra_api.seguridad import generar_codigo_invitacion, normalizar_codigo
 
 router = APIRouter(prefix="/porras", tags=["porras"])
@@ -21,6 +22,10 @@ def _salida(porra: Porra, codigo_competicion: str) -> PorraOut:
         temporada=porra.temporada,
         codigo_invitacion=porra.codigo_invitacion,
     )
+
+
+def _es_miembro(sesion: Session, porra_id: int, jugador_id: int) -> bool:
+    return sesion.get(Miembro, (porra_id, jugador_id)) is not None
 
 
 def _comprobar_que_puede_jugar(jugador: Jugador, competicion: Competicion) -> None:
@@ -70,6 +75,43 @@ def unirse_a_porra(datos: UnirsePorra, jugador: JugadorActual, sesion: SesionDep
     )
     sesion.commit()
     return _salida(porra, competicion.codigo)
+
+
+@router.post("/chat", response_model=PorraOut)
+def vincular_chat(datos: VincularChat, jugador: JugadorActual, sesion: SesionDep):
+    """Asocia un chat de Telegram a una porra. Solo puede hacerlo uno de sus miembros."""
+    fila = sesion.execute(
+        select(Porra, Competicion)
+        .join(Competicion)
+        .where(Porra.codigo_invitacion == normalizar_codigo(datos.codigo))
+    ).first()
+    if fila is None or not _es_miembro(sesion, fila[0].id, jugador.id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No hay ninguna porra tuya con ese código")
+    porra, competicion = fila
+
+    porra.telegram_chat_id = datos.chat_id
+    try:
+        sesion.commit()
+    except IntegrityError:
+        sesion.rollback()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "Este chat ya está vinculado a otra porra"
+        ) from None
+    return _salida(porra, competicion.codigo)
+
+
+@router.get("/chat/{chat_id}", response_model=PorraOut)
+def porra_del_chat(chat_id: int, jugador: JugadorActual, sesion: SesionDep):
+    """La porra vinculada a un chat de Telegram, si el jugador es miembro."""
+    fila = sesion.execute(
+        select(Porra, Competicion.codigo).join(Competicion).where(Porra.telegram_chat_id == chat_id)
+    ).first()
+    if fila is None or not _es_miembro(sesion, fila[0].id, jugador.id):
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, "Este chat no está vinculado a ninguna porra tuya"
+        )
+    porra, codigo = fila
+    return _salida(porra, codigo)
 
 
 @router.get("", response_model=list[PorraOut])
@@ -123,8 +165,7 @@ def _filas_clasificacion(sesion: Session, porra: Porra) -> list[FilaClasificacio
 def clasificacion(porra_id: int, jugador: JugadorActual, sesion: SesionDep):
     """Clasificación de la porra. Solo la ven sus miembros; para los demás, no existe (404)."""
     porra = sesion.get(Porra, porra_id)
-    es_miembro = porra is not None and sesion.get(Miembro, (porra_id, jugador.id)) is not None
-    if not es_miembro:
+    if porra is None or not _es_miembro(sesion, porra_id, jugador.id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "La porra no existe")
 
     return [

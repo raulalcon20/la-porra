@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -11,6 +12,7 @@ class Settings(BaseSettings):
     app_version: str = "0.1.0"
     environment: str = "development"
     database_url: str
+    bot_secreto: SecretStr | None = None
 
 
 @lru_cache

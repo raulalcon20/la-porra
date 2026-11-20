@@ -20,6 +20,11 @@ class JugadorCrear(BaseModel):
     nombre: Nombre
 
 
+class JugadorTelegramCrear(BaseModel):
+    nombre: Nombre
+    telegram_id: int
+
+
 class JugadorOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -44,6 +49,11 @@ class PartidoOut(BaseModel):
     goles_visitante: int | None
 
 
+class ProximaJornadaOut(BaseModel):
+    temporada: int
+    jornada: int
+
+
 class PronosticoIn(BaseModel):
     goles_local: Goles
     goles_visitante: Goles
@@ -66,6 +76,11 @@ class PorraCrear(BaseModel):
 
 class UnirsePorra(BaseModel):
     codigo: str
+
+
+class VincularChat(BaseModel):
+    codigo: str
+    chat_id: int
 
 
 class PorraOut(BaseModel):
